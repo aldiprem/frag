@@ -213,10 +213,20 @@ async def get_user(username: str) -> Optional[dict]:
         return None
 
 
-async def pay_stars_order(username: str, quantity: int) -> Optional[str]:
-    """Proses pembayaran stars."""
+
+# ===================== FUNGSI PAYMENT DENGAN OPSI SHOW SENDER =====================
+
+async def pay_stars_order(username: str, quantity: int, show_sender: bool = True) -> Optional[str]:
+    """Proses pembayaran stars dengan opsi menampilkan/menyembunyikan pengirim.
+    
+    Args:
+        username: Username penerima
+        quantity: Jumlah stars
+        show_sender: True = tampilkan nama pengirim (akun Fragment Anda)
+                     False = sembunyikan nama (gift mode dari Telegram resmi)
+    """
     try:
-        logger.info(f"Starting payment for @{username} - {quantity} stars")
+        logger.info(f"Starting payment for @{username} - {quantity} stars (show_sender={show_sender})")
         
         # 1. Cari user
         user = await get_user_address(username)
@@ -240,8 +250,11 @@ async def pay_stars_order(username: str, quantity: int) -> Optional[str]:
             logger.error("No req_id in response")
             return None
 
-        # 3. Get buy details
-        buy = await get_buy_stars(req_id)
+        # 3. Get buy details dengan parameter show_sender
+        # show_sender = "1" jika True, "0" jika False
+        show_sender_value = "1" if show_sender else "0"
+        
+        buy = await get_buy_stars_with_sender(req_id, show_sender_value)
         if not buy:
             logger.error("Failed to get buy details")
             return None
@@ -276,6 +289,25 @@ async def pay_stars_order(username: str, quantity: int) -> Optional[str]:
         return None
 
 
+async def get_buy_stars_with_sender(req_id: str, show_sender: str = "1") -> Optional[dict]:
+    """Dapatkan detail pembayaran dengan opsi show_sender.
+    
+    Args:
+        req_id: Request ID dari init_buy_stars
+        show_sender: "1" = tampilkan pengirim, "0" = sembunyikan pengirim
+    """
+    try:
+        data = {
+            "transaction": "1",
+            "id": req_id,
+            "show_sender": show_sender,  # Parameter penting!
+            "method": "getBuyStarsLink",
+        }
+        return await post(COOKIES, HASH, data)
+    except Exception as e:
+        logger.error(f"Error in get_buy_stars_with_sender: {e}")
+        return None
+
 # ===================== BOT INITIALIZATION =====================
 print("Starting bot...")
 bot = TelegramClient('fragment_bot_session', API_ID, API_HASH)
@@ -288,7 +320,7 @@ STATE_IDLE = "idle"
 STATE_WAITING_USERNAME = "waiting_username"
 STATE_WAITING_STARS = "waiting_stars"
 STATE_CONFIRM_PURCHASE = "confirm_purchase"
-
+STATE_WAITING_SENDER_OPTION = "waiting_sender_option"
 
 # ===================== HELPER FUNCTIONS =====================
 
@@ -389,12 +421,52 @@ async def callback_handler(event):
     user_id = event.sender_id
     data = event.data.decode('utf-8')
     
-    if data == "buy":
+    # ===================== HANDLER UNTUK OPSI SENDER =====================
+    
+    # Handler untuk memilih TAMPILKAN NAMA (show_sender = True)
+    if data.startswith("sender_show_"):
+        # Ekstrak user_id dari data jika perlu, tapi kita sudah punya user_id
+        user_data[user_id]['show_sender'] = True
+        await show_confirmation(event, user_id)
+        return
+    
+    # Handler untuk memilih SEMBUNYIKAN NAMA (show_sender = False)
+    elif data.startswith("sender_hide_"):
+        user_data[user_id]['show_sender'] = False
+        await show_confirmation(event, user_id)
+        return
+    
+    # Handler untuk kembali ke opsi sender dari halaman konfirmasi
+    elif data.startswith("sender_back_"):
+        if user_id not in user_data:
+            await event.answer("Sesi telah berakhir, silakan mulai lagi.", alert=True)
+            return
+        
+        # Kembali ke halaman pilihan sender
+        await ask_sender_option(event, user_id)
+        return
+    
+    # ===================== HANDLER UNTUK KONFIRMASI/CANCEL =====================
+    
+    elif data.startswith("confirm_"):
+        await confirm_purchase(event, user_id)
+        return
+    
+    elif data.startswith("cancel_"):
+        await cancel_purchase(event, user_id)
+        return
+    
+    # ===================== HANDLER UNTUK MENU UTAMA =====================
+    
+    elif data == "buy":
+        # Reset state untuk pembelian baru
         user_states[user_id] = STATE_WAITING_USERNAME
         user_data[user_id] = {}
         await event.edit(
             "🛒 **Mulai Pembelian Stars**\n\n"
-            "Silakan masukkan **username** penerima:",
+            "Silakan masukkan **username** penerima:\n"
+            "_(Contoh: @username atau username)_\n\n"
+            "Ketik /cancel untuk membatalkan.",
             parse_mode='markdown'
         )
     
@@ -404,11 +476,15 @@ async def callback_handler(event):
             "1️⃣ Klik 'Beli Stars' atau ketik /buy\n"
             "2️⃣ Masukkan username penerima\n"
             "3️⃣ Masukkan jumlah stars\n"
-            "4️⃣ Konfirmasi pembelian\n"
-            "5️⃣ Tunggu proses selesai\n\n"
+            "4️⃣ Pilih opsi pengirim (Tampilkan/Sembunyikan nama)\n"
+            "5️⃣ Konfirmasi pembelian\n"
+            "6️⃣ Tunggu proses selesai\n\n"
             "**Penting:**\n"
             "• Pastikan wallet memiliki saldo cukup\n"
-            "• Transaksi tidak dapat dibatalkan",
+            "• Transaksi tidak dapat dibatalkan\n\n"
+            "**Opsi Pengirim:**\n"
+            "• **Tampilkan nama** - Penerima melihat nama akun Fragment Anda\n"
+            "• **Sembunyikan (Gift)** - Muncul sebagai hadiah dari Telegram (anonim)",
             buttons=[Button.inline("🔙 Kembali", data="start")],
             parse_mode='markdown'
         )
@@ -418,13 +494,18 @@ async def callback_handler(event):
             await event.answer("Akses ditolak!", alert=True)
             return
         
+        fragment_ok, wallet_ok = await check_config()
         admin_text = (
             "⚙️ **Panel Admin**\n\n"
             f"• Status: Aktif\n"
-            f"• Pengguna Aktif: {len(user_states)}"
+            f"• Fragment API: {'✅' if fragment_ok else '❌'}\n"
+            f"• Wallet: {'✅' if wallet_ok else '❌'}\n"
+            f"• Pengguna Aktif: {len(user_states)}\n"
+            f"• Total Sesi: {len(user_data)}"
         )
         buttons = [
             [Button.inline("💰 Cek Saldo", data="balance")],
+            [Button.inline("🔄 Restart Bot", data="restart")],
             [Button.inline("🔙 Kembali", data="start")]
         ]
         await event.edit(admin_text, buttons=buttons, parse_mode='markdown')
@@ -439,8 +520,12 @@ async def callback_handler(event):
             balance = await get_balance()
             await event.edit(
                 f"💰 **Saldo Wallet**\n\n"
-                f"Saldo: `{balance:.2f}` TON",
-                buttons=[Button.inline("🔙 Kembali", data="admin")],
+                f"Saldo: `{balance:.2f}` TON\n\n"
+                f"_Update terakhir: {datetime.now().strftime('%H:%M:%S')}_",
+                buttons=[
+                    [Button.inline("🔄 Refresh", data="balance")],
+                    [Button.inline("🔙 Kembali", data="admin")]
+                ],
                 parse_mode='markdown'
             )
         except Exception as e:
@@ -450,14 +535,29 @@ async def callback_handler(event):
                 buttons=[Button.inline("🔙 Kembali", data="admin")]
             )
     
+    elif data == "restart":
+        if not await is_admin(user_id):
+            await event.answer("Akses ditolak!", alert=True)
+            return
+        
+        # Reset semua state
+        user_states.clear()
+        user_data.clear()
+        await event.edit(
+            "✅ **Bot telah di-restart**\n\n"
+            "Semua sesi pengguna telah dihapus.",
+            buttons=[Button.inline("🏠 Kembali ke Menu", data="start")],
+            parse_mode='markdown'
+        )
+    
     elif data == "start":
         await start_handler(event)
     
-    elif data.startswith("confirm_"):
-        await confirm_purchase(event, user_id)
+    # ===================== HANDLER UNTUK DATA TIDAK DIKENAL =====================
     
-    elif data.startswith("cancel_"):
-        await cancel_purchase(event, user_id)
+    else:
+        logger.warning(f"Unknown callback data: {data} from user {user_id}")
+        await event.answer("Perintah tidak dikenal!", alert=True)
 
 
 @bot.on(events.NewMessage)
@@ -535,21 +635,46 @@ async def process_stars(event, user_id: int, stars_str: str):
         user_data[user_id]['stars'] = stars
         user_data[user_id]['price'] = calculate_price(stars)
         
-        await show_confirmation(event, user_id)
+        # Tanyakan opsi show sender
+        await ask_sender_option(event, user_id)
         
     except ValueError:
         await event.respond("❌ Masukkan angka yang valid.")
 
+async def ask_sender_option(event, user_id: int):
+    """Tanya user apakah ingin menampilkan nama pengirim atau tidak."""
+    
+    option_text = (
+        "👤 **Opsi Pengirim**\n\n"
+        "Pilih bagaimana nama pengirim ditampilkan:\n\n"
+        "✅ **Tampilkan nama saya** - Penerima akan melihat nama akun Fragment Anda sebagai pengirim\n"
+        "❌ **Sembunyikan nama** - Akan muncul sebagai hadiah dari Telegram (anonim)\n\n"
+        "Pilih opsi di bawah:"
+    )
+    
+    buttons = [
+        [
+            Button.inline("👤 Tampilkan Nama Saya", data=f"sender_show_{user_id}"),
+            Button.inline("🎁 Sembunyikan (Gift)", data=f"sender_hide_{user_id}")
+        ]
+    ]
+    
+    user_states[user_id] = STATE_WAITING_SENDER_OPTION
+    await event.respond(option_text, buttons=buttons, parse_mode='markdown')
 
 async def show_confirmation(event, user_id: int):
     data = user_data[user_id]
+    
+    # Tentukan teks berdasarkan opsi sender
+    sender_text = "👤 Menampilkan nama saya" if data.get('show_sender', True) else "🎁 Sembunyikan (Gift mode)"
     
     confirm_text = (
         "📝 **Konfirmasi Pembelian**\n\n"
         f"**Penerima:** {data['nickname']}\n"
         f"**Username:** @{data['username']}\n"
         f"**Stars:** {format_number(data['stars'])}\n"
-        f"**Harga:** {data['price']:.2f} TON\n\n"
+        f"**Harga:** {data['price']:.2f} TON\n"
+        f"**Opsi Pengirim:** {sender_text}\n\n"
         "⚠️ Transaksi tidak dapat dibatalkan!\n\n"
         "Setuju?"
     )
@@ -558,7 +683,8 @@ async def show_confirmation(event, user_id: int):
         [
             Button.inline("✅ Ya", data=f"confirm_{user_id}"),
             Button.inline("❌ Tidak", data=f"cancel_{user_id}")
-        ]
+        ],
+        [Button.inline("🔙 Ubah Opsi Pengirim", data=f"sender_back_{user_id}")]
     ]
     
     user_states[user_id] = STATE_CONFIRM_PURCHASE
@@ -572,17 +698,23 @@ async def confirm_purchase(event, user_id: int):
     
     purchase_data = user_data[user_id]
     
+    # Pastikan show_sender memiliki nilai default True
+    show_sender = purchase_data.get('show_sender', True)
+    
     await event.edit(
         "⏳ **Memproses pembelian...**\n\n"
         f"Penerima: @{purchase_data['username']}\n"
-        f"Stars: {format_number(purchase_data['stars'])}",
+        f"Stars: {format_number(purchase_data['stars'])}\n"
+        f"Opsi: {'Tampilkan nama' if show_sender else 'Sembunyikan (Gift)'}",
         parse_mode='markdown'
     )
     
     try:
+        # Panggil pay_stars_order dengan parameter show_sender
         tx_hash = await pay_stars_order(
             username=purchase_data['username'],
-            quantity=purchase_data['stars']
+            quantity=purchase_data['stars'],
+            show_sender=show_sender
         )
         
         if tx_hash:
@@ -590,6 +722,7 @@ async def confirm_purchase(event, user_id: int):
                 "✅ **Pembelian Berhasil!**\n\n"
                 f"**Penerima:** @{purchase_data['username']}\n"
                 f"**Stars:** {format_number(purchase_data['stars'])}\n"
+                f"**Opsi:** {'👤 Nama ditampilkan' if show_sender else '🎁 Gift mode (anonim)'}\n"
                 f"**Hash:** `{tx_hash}`\n\n"
                 f"[Lihat di TON Viewer](https://tonviewer.com/transaction/{tx_hash})"
             )
@@ -679,4 +812,3 @@ if __name__ == '__main__':
         logger.info("🛑 Bot dihentikan oleh user")
     except Exception as e:
         logger.error(f"❌ Error fatal: {e}")
-      
