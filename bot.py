@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import User
 from telethon.errors import FloodWaitError
-import FragmentAPI
-from FragmentAPI import AsyncFragmentAPI, FragmentAPIError
+import fragment_api_py
+from fragment_api_py import AsyncFragmentAPI, FragmentAPIError
 
 from config import Config, logger
 
