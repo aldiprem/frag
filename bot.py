@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Stars Bot - Auto Buy Telegram Stars via Fragment.com
-Dibuat dengan Telethon dan Fragment-API-Py
+Menggunakan fragment-api-py official
 """
 
 import os
@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import User
 from telethon.errors import FloodWaitError
-import fragment_api_py
+
+# Import dari fragment-api-py yang sudah terinstall
 from fragment_api_py import AsyncFragmentAPI, FragmentAPIError
 
 from config import Config, logger
@@ -49,24 +50,36 @@ class StarsBot:
         try:
             logger.info("🔄 Inisialisasi Fragment API...")
             
+            # Cek apakah wallet seed diisi
+            wallet_mnemonic = None
+            if Config.WALLET_MNEMONIC and not Config.WALLET_MNEMONIC.startswith('abandon'):
+                wallet_mnemonic = Config.WALLET_MNEMONIC.split()
+            
+            # Inisialisasi API
             self.fragment_api = AsyncFragmentAPI(
                 cookies=Config.FRAGMENT_COOKIES,
                 hash_value=Config.FRAGMENT_HASH,
-                wallet_mnemonic=Config.WALLET_MNEMONIC if Config.WALLET_MNEMONIC != 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon' else None,
+                wallet_mnemonic=wallet_mnemonic,
                 wallet_api_key=Config.TON_API_KEY if Config.TON_API_KEY != 'your_ton_api_key_here' else None,
                 wallet_version=Config.WALLET_VERSION
             )
             
-            # Test koneksi dengan get balance
+            # Test koneksi
             try:
+                # Cek apakah bisa connect
+                test = await self.fragment_api.get_recipient_stars('telegram')
+                logger.info("✅ Connected to Fragment.com")
+                
+                # Cek wallet balance
                 balance = await self.fragment_api.get_wallet_balance()
-                logger.info(f"✅ Fragment API siap!")
-                logger.info(f"💰 Wallet Balance: {balance.get('balance_ton', 'Unknown')} TON")
-                logger.info(f"🏦 Wallet Address: {balance.get('address', 'Unknown')[:10]}...")
+                logger.info(f"💰 Wallet Balance: {balance.get('balance', '0')} TON")
+                logger.info(f"🏦 Wallet Address: {balance.get('address', 'Unknown')}")
+                
                 return True
+                
             except Exception as e:
-                logger.warning(f"⚠️ Wallet not configured: {e}")
-                logger.info("✅ Fragment API siap (mode terbatas - wallet perlu dikonfigurasi)")
+                logger.warning(f"⚠️ Could not get wallet info: {e}")
+                logger.info("✅ Fragment API siap (mode terbatas)")
                 return True
                 
         except Exception as e:
@@ -246,9 +259,9 @@ Ketik /cancel untuk membatalkan
             msg = f"""
 💰 **INFORMASI WALLET**
 
-**Balance:** `{balance.get('balance_ton', 'Unknown')} TON`
+**Balance:** `{balance.get('balance', '0')} TON`
 **Address:** `{balance.get('address', 'Unknown')}`
-**Version:** `{balance.get('wallet_version', 'Unknown')}`
+**Version:** `{balance.get('wallet_version', Config.WALLET_VERSION)}`
 
 💡 Gunakan /buy untuk membeli Stars
             """
@@ -466,8 +479,8 @@ Apakah data sudah benar?
         
         try:
             # Cek apakah wallet dikonfigurasi
-            if not self.fragment_api or not Config.WALLET_MNEMONIC or Config.WALLET_MNEMONIC.startswith('abandon'):
-                await event.edit("❌ **WALLET BELUM DIKONFIGURASI**\n\nWallet TON belum diatur di file .env.\nGanti WALLET_MNEMONIC dengan seed phrase asli Anda!")
+            if not self.fragment_api:
+                await event.edit("❌ **FRAGMENT API TIDAK TERSEDIA**")
                 return
             
             # Proses pembelian
@@ -479,17 +492,20 @@ Apakah data sudah benar?
                 show_sender=True
             )
             
-            if result and hasattr(result, 'success') and result.success:
+            # Cek hasil dari API
+            if hasattr(result, 'success') and result.success:
                 # Update statistik
                 self.total_purchases += 1
                 self.total_stars += state.amount
+                
+                tx_hash = getattr(result, 'transaction_hash', 'N/A')
                 
                 success_msg = f"""
 ✅ **PEMBELIAN BERHASIL!**
 
 **Penerima:** @{state.username}
 **Jumlah:** {state.amount} ⭐
-**Transaction Hash:** `{getattr(result, 'transaction_hash', 'N/A')}`
+**Transaction Hash:** `{tx_hash}`
 
 ✨ Stars akan segera masuk ke akun penerima.
 Terima kasih telah menggunakan bot ini!
@@ -516,6 +532,9 @@ Ketik /buy untuk mencoba lagi.
                 await event.edit(error_msg, parse_mode='markdown')
                 logger.error(f"Purchase failed: {error}")
                 
+        except FragmentAPIError as e:
+            logger.error(f"FragmentAPIError: {e}")
+            await event.edit(f"❌ **FRAGMENT API ERROR:** {str(e)}")
         except Exception as e:
             logger.error(f"Purchase exception: {e}")
             await event.edit(f"❌ **ERROR:** {str(e)[:200]}\n\nKetik /buy untuk coba lagi.")
