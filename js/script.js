@@ -5,7 +5,8 @@ class FragmentStarsApp {
             pricePerStar: 0.02,
             minStars: 50,
             maxStars: 100000,
-            apiEndpoint: 'https://caused-fifteen-ssl-pci.trycloudflare.com',
+            // ============= PERBAIKAN: API URL YANG BENAR =============
+            apiUrl: 'https://caused-fifteen-ssl-pci.trycloudflare.com', // URL Cloudflared Anda
             botUsername: 'autofragmentbot'
         };
 
@@ -102,8 +103,10 @@ class FragmentStarsApp {
 
         this.viewTransactionBtn?.addEventListener('click', () => {
             const txHash = this.viewTransactionBtn.dataset.txHash;
-            if (txHash) {
+            if (txHash && txHash !== 'simulated_tx_hash_undefined') {
                 window.open(`https://tonviewer.com/transaction/${txHash}`, '_blank');
+            } else {
+                this.showToast('Info', 'No transaction hash available', 'info');
             }
         });
 
@@ -198,6 +201,7 @@ class FragmentStarsApp {
         this.totalPriceEl.textContent = `${total.toFixed(2)} TON`;
     }
 
+    // ============= FUNGSI HANDLE PURCHASE YANG SUDAH DIPERBAIKI =============
     async handlePurchase(e) {
         e.preventDefault();
 
@@ -225,15 +229,32 @@ class FragmentStarsApp {
         submitBtn.disabled = true;
 
         try {
-            // ============= PANGGILAN API NYATA KE BACKEND =============
-            console.log('Sending purchase request...', {
+            // ============= PERBAIKAN 1: CEK API URL =============
+            if (!this.config.apiUrl || this.config.apiUrl === 'YOUR_BACKEND_URL_HERE') {
+                throw new Error('API URL not configured. Please contact administrator.');
+            }
+
+            // ============= PERBAIKAN 2: BUILD URL DENGAN BENAR =============
+            // Pastikan URL tidak double slash
+            const baseUrl = this.config.apiUrl.endsWith('/') 
+                ? this.config.apiUrl.slice(0, -1) 
+                : this.config.apiUrl;
+            
+            const apiEndpoint = `${baseUrl}/purchase`;
+            
+            console.log('Sending purchase request to:', apiEndpoint);
+            console.log('Purchase data:', {
                 username: username.replace('@', ''),
                 stars: stars,
                 show_sender: this.state.showSender
             });
 
+            // ============= PERBAIKAN 3: TAMBAHKAN TIMEOUT =============
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
             // Panggil endpoint backend
-            const response = await fetch(`${this.config.apiUrl}/purchase`, {
+            const response = await fetch(apiEndpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -242,8 +263,26 @@ class FragmentStarsApp {
                     username: username.replace('@', ''),
                     stars: stars,
                     show_sender: this.state.showSender
-                })
+                }),
+                signal: controller.signal
             });
+
+            clearTimeout(timeoutId);
+
+            // ============= PERBAIKAN 4: CEK RESPONSE TYPE =============
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                // Jika bukan JSON, baca sebagai text untuk debug
+                const textResponse = await response.text();
+                console.error('Non-JSON response:', textResponse.substring(0, 200));
+                
+                // Cek apakah ini response HTML error
+                if (textResponse.includes('<!DOCTYPE html>') || textResponse.includes('<html>')) {
+                    throw new Error('Server returned HTML instead of JSON. Backend might be down or URL is wrong.');
+                } else {
+                    throw new Error('Server returned non-JSON response. Please check backend.');
+                }
+            }
 
             // Parse response
             const result = await response.json();
@@ -254,12 +293,20 @@ class FragmentStarsApp {
             }
 
             if (result.success) {
+                // ============= PERBAIKAN 5: VALIDASI TX HASH =============
+                const txHash = result.tx_hash || result.transaction_hash || result.hash;
+                
+                if (!txHash || txHash === 'simulated_tx_hash_undefined') {
+                    console.warn('Invalid transaction hash received:', txHash);
+                    this.showToast('Warning', 'Transaction completed but hash may be invalid', 'warning');
+                }
+                
                 // Success - tampilkan modal dengan tx hash NYATA
                 this.closeModal(this.purchaseModal);
                 this.showSuccessModal({
                     username: username.replace('@', ''),
                     stars: stars,
-                    txHash: result.tx_hash,  // Hash NYATA dari blockchain
+                    txHash: txHash || 'Hash not available',
                     recipient: result.recipient || username.replace('@', '')
                 });
                 
@@ -276,12 +323,19 @@ class FragmentStarsApp {
             let errorMessage = error.message || 'Purchase failed';
             
             // Handle specific error cases
-            if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
-                errorMessage = 'Cannot connect to server. Please check your connection or try again later.';
+            if (error.name === 'AbortError') {
+                errorMessage = 'Request timeout. Server is not responding. Please try again later.';
+            } else if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
+                errorMessage = 'Cannot connect to server. Please check:\n' +
+                              '• Backend is running\n' +
+                              '• Cloudflared tunnel is active\n' +
+                              '• API URL is correct';
             } else if (errorMessage.includes('User not found')) {
                 errorMessage = 'Username not found on Fragment. Please check and try again.';
             } else if (errorMessage.includes('insufficient balance')) {
                 errorMessage = 'Insufficient wallet balance. Please top up your wallet.';
+            } else if (errorMessage.includes('HTML instead of JSON')) {
+                errorMessage = 'Backend not responding. Please check if server is running.';
             }
             
             this.showToast('Error', errorMessage, 'error');
@@ -311,8 +365,14 @@ class FragmentStarsApp {
     showToast(title, message, type = 'info') {
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
+        
+        let icon = 'info-circle';
+        if (type === 'success') icon = 'check-circle';
+        if (type === 'error') icon = 'exclamation-circle';
+        if (type === 'warning') icon = 'exclamation-triangle';
+        
         toast.innerHTML = `
-            <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i>
+            <i class="fas fa-${icon}"></i>
             <div class="toast-content">
                 <div class="toast-title">${title}</div>
                 <div class="toast-message">${message}</div>
@@ -324,7 +384,7 @@ class FragmentStarsApp {
 
         // Auto remove after 5 seconds
         setTimeout(() => {
-            toast.remove();
+            if (toast.parentNode) toast.remove();
         }, 5000);
 
         // Close button
