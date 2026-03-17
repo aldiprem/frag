@@ -3,10 +3,10 @@ class FragmentStarsApp {
     constructor() {
         this.config = {
             pricePerStar: 0.02,
-            minStars: 10,
+            minStars: 50,
             maxStars: 100000,
-            apiEndpoint: 'https://caused-fifteen-ssl-pci.trycloudflare.com', // Ganti dengan endpoint bot Anda
-            botUsername: 'autofragmentbot' // Ganti dengan username bot Anda
+            apiEndpoint: 'https://caused-fifteen-ssl-pci.trycloudflare.com',
+            botUsername: 'autofragmentbot'
         };
 
         this.state = {
@@ -225,24 +225,67 @@ class FragmentStarsApp {
         submitBtn.disabled = true;
 
         try {
-            // Here you would make an API call to your bot
-            // For now, we'll simulate a successful purchase
-            await this.simulatePurchase({
+            // ============= PANGGILAN API NYATA KE BACKEND =============
+            console.log('Sending purchase request...', {
                 username: username.replace('@', ''),
                 stars: stars,
-                showSender: this.state.showSender
+                show_sender: this.state.showSender
             });
 
-            // Show success modal
-            this.closeModal(this.purchaseModal);
-            this.showSuccessModal({
-                username: username.replace('@', ''),
-                stars: stars,
-                txHash: 'simulated_tx_hash_' + Date.now()
+            // Panggil endpoint backend
+            const response = await fetch(`${this.config.apiUrl}/purchase`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    username: username.replace('@', ''),
+                    stars: stars,
+                    show_sender: this.state.showSender
+                })
             });
+
+            // Parse response
+            const result = await response.json();
+            console.log('Purchase response:', result);
+
+            if (!response.ok) {
+                throw new Error(result.error || `HTTP error! status: ${response.status}`);
+            }
+
+            if (result.success) {
+                // Success - tampilkan modal dengan tx hash NYATA
+                this.closeModal(this.purchaseModal);
+                this.showSuccessModal({
+                    username: username.replace('@', ''),
+                    stars: stars,
+                    txHash: result.tx_hash,  // Hash NYATA dari blockchain
+                    recipient: result.recipient || username.replace('@', '')
+                });
+                
+                this.showToast('Success', 'Purchase completed successfully!', 'success');
+            } else {
+                // Backend mengembalikan success: false
+                throw new Error(result.error || 'Purchase failed');
+            }
 
         } catch (error) {
-            this.showToast('Error', error.message || 'Purchase failed', 'error');
+            console.error('Purchase error:', error);
+            
+            // Tampilkan error ke user
+            let errorMessage = error.message || 'Purchase failed';
+            
+            // Handle specific error cases
+            if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
+                errorMessage = 'Cannot connect to server. Please check your connection or try again later.';
+            } else if (errorMessage.includes('User not found')) {
+                errorMessage = 'Username not found on Fragment. Please check and try again.';
+            } else if (errorMessage.includes('insufficient balance')) {
+                errorMessage = 'Insufficient wallet balance. Please top up your wallet.';
+            }
+            
+            this.showToast('Error', errorMessage, 'error');
+            
         } finally {
             // Reset button state
             this.state.isProcessing = false;
@@ -251,24 +294,16 @@ class FragmentStarsApp {
         }
     }
 
-    async simulatePurchase(data) {
-        // Simulate API call
-        return new Promise((resolve) => {
-            setTimeout(() => {
-                console.log('Purchase data:', data);
-                resolve({ success: true });
-            }, 2000);
-        });
-    }
-
     showSuccessModal(data) {
         const details = document.getElementById('transactionDetails');
         details.innerHTML = `
-            <div>Recipient: @${data.username}</div>
-            <div>Stars: ${data.stars.toLocaleString()}</div>
-            <div>Transaction: ${data.txHash}</div>
+            <div><strong>Recipient:</strong> @${data.username}</div>
+            <div><strong>Stars:</strong> ${data.stars.toLocaleString()}</div>
+            <div><strong>Transaction Hash:</strong></div>
+            <div style="font-size: 12px; word-break: break-all; background: #1a1a1a; padding: 8px; border-radius: 4px; margin-top: 4px;">${data.txHash}</div>
         `;
         
+        // Set transaction hash untuk tombol view
         this.viewTransactionBtn.dataset.txHash = data.txHash;
         this.successModal.classList.add('active');
     }
