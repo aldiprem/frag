@@ -87,7 +87,7 @@ async def test_cookies():
     # Cek Fragment API
     try:
         # Import FragmentAPI
-        from FragmentAPI import AsyncFragmentAPI
+        from fragment_api_py import AsyncFragmentAPI
         
         print(f"{Colors.YELLOW}⏳ Mencoba koneksi ke Fragment.com...{Colors.RESET}")
         
