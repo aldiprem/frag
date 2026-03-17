@@ -1,0 +1,14 @@
+*.mo
+*.pyc
+.env
+.env.*
+/.idea/
+/.ruff_cache/
+/.venv/
+/caddy/config/caddy/
+/caddy/data/caddy/
+/psql/data/
+/redis/data/
+__pycache__/
+**/*.log
+stub.json
