@@ -8,6 +8,11 @@ import json
 import time
 from typing import Optional, Dict, Any
 
+# Tambahkan class Exception ini
+class FragmentAPIError(Exception):
+    """Custom exception untuk Fragment API"""
+    pass
+
 class AsyncFragmentAPI:
     """Simple Fragment API wrapper"""
     
