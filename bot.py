@@ -50,10 +50,9 @@ class StarsBot:
         try:
             logger.info("🔄 Inisialisasi Fragment API...")
             
-            # Cek apakah wallet seed diisi
             wallet_mnemonic = None
             if Config.WALLET_MNEMONIC and not Config.WALLET_MNEMONIC.startswith('abandon'):
-                wallet_mnemonic = Config.WALLET_MNEMONIC.split()
+                wallet_mnemonic = Config.WALLET_MNEMONIC
             
             # Inisialisasi API
             self.fragment_api = AsyncFragmentAPI(
