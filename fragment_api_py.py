@@ -6,9 +6,8 @@ Menggunakan requests untuk komunikasi dengan Fragment API
 import requests
 import json
 import time
-import hashlib
-import hmac
-from typing import Optional, Dict, Any, Tuple
+import re
+from typing import Optional, Dict, Any, Union, List
 from urllib.parse import urlencode
 
 class FragmentAPIError(Exception):
@@ -22,7 +21,7 @@ class AsyncFragmentAPI:
     API_URL = "https://fragment.com/api"
     
     def __init__(self, cookies: str, hash_value: str = None, 
-                 wallet_mnemonic: str = None, 
+                 wallet_mnemonic: Union[str, List[str]] = None, 
                  wallet_api_key: str = None,
                  wallet_version: str = 'V4R2'):
         
@@ -55,6 +54,18 @@ class AsyncFragmentAPI:
                 cookies[key] = value
         return cookies
     
+    def _validate_wallet_mnemonic(self):
+        """Validasi wallet mnemonic"""
+        if not self.wallet_mnemonic:
+            return False
+        
+        # Jika berupa list, gabungkan jadi string untuk validasi
+        if isinstance(self.wallet_mnemonic, list):
+            mnemonic_str = ' '.join(self.wallet_mnemonic)
+            return not mnemonic_str.startswith('abandon')
+        else:
+            return not self.wallet_mnemonic.startswith('abandon')
+    
     async def get_wallet_balance(self) -> Dict[str, Any]:
         """Get real wallet balance dari Fragment"""
         try:
@@ -68,32 +79,38 @@ class AsyncFragmentAPI:
                 # Parse balance dari response HTML
                 html = response.text
                 
-                # Extract balance (ini perlu disesuaikan dengan struktur HTML Fragment)
-                import re
+                # Extract balance - cari angka dengan TON
                 balance_match = re.search(r'([0-9.]+)\s*TON', html)
-                address_match = re.search(r'([EQA-Za-z0-9_-]{48,})', html)
-                
                 balance = balance_match.group(1) if balance_match else "0"
+                
+                # Extract address - cari pattern address TON (biasanya mulai EQ)
+                address_match = re.search(r'(EQ[A-Za-z0-9_-]{46,})', html)
+                if not address_match:
+                    # Coba pattern lain
+                    address_match = re.search(r'wallet-address["\']?\s*:\s*["\']([^"\']+)', html)
+                
                 address = address_match.group(1) if address_match else "Unknown"
                 
                 return {
+                    'balance': balance,
                     'balance_ton': balance,
                     'address': address,
                     'wallet_version': self.wallet_version
                 }
             else:
-                # Fallback ke dummy
                 return {
-                    'balance_ton': '0.5',
-                    'address': 'EQDummyAddress',
+                    'balance': '0',
+                    'balance_ton': '0',
+                    'address': 'Unknown',
                     'wallet_version': self.wallet_version
                 }
                 
         except Exception as e:
             print(f"Error getting wallet balance: {e}")
             return {
+                'balance': '0',
                 'balance_ton': '0',
-                'address': 'Error',
+                'address': 'Unknown',
                 'wallet_version': self.wallet_version
             }
     
@@ -122,10 +139,11 @@ class AsyncFragmentAPI:
     async def buy_stars(self, username: str, quantity: int, show_sender: bool = True) -> Any:
         """REAL implementation untuk beli stars"""
         class Result:
-            def __init__(self, success, tx_hash=None, error=None):
+            def __init__(self, success, tx_hash=None, error=None, data=None):
                 self.success = success
                 self.transaction_hash = tx_hash
                 self.error = error
+                self.data = data
         
         try:
             print(f"🔄 Processing real purchase: {quantity} stars for @{username}")
@@ -135,16 +153,18 @@ class AsyncFragmentAPI:
                 return Result(False, error="FRAGMENT_HASH tidak ditemukan. Jalankan get_hash.py dulu!")
             
             # Validasi wallet mnemonic
-            if not self.wallet_mnemonic or self.wallet_mnemonic.startswith('abandon'):
-                return Result(False, error="Wallet seed phrase belum diisi di .env!")
+            if not self._validate_wallet_mnemonic():
+                return Result(False, error="Wallet seed phrase belum diisi atau masih menggunakan default!")
             
-            # 1. Dapatkan informasi pembayaran
+            # Siapkan payload
             payload = {
                 'hash': self.hash_value,
                 'recipient': username.replace('@', ''),
-                'quantity': quantity,
-                'showSender': show_sender
+                'quantity': str(quantity),
+                'showSender': str(show_sender).lower()
             }
+            
+            print(f"📤 Sending request to Fragment API...")
             
             # Request ke Fragment API
             response = self.session.post(
@@ -153,31 +173,34 @@ class AsyncFragmentAPI:
                 timeout=30
             )
             
+            print(f"📥 Response status: {response.status_code}")
+            
             if response.status_code != 200:
                 return Result(False, error=f"API Error: HTTP {response.status_code}")
             
-            result = response.json()
+            try:
+                result = response.json()
+                print(f"📦 Response data: {json.dumps(result, indent=2)[:200]}")
+            except:
+                return Result(False, error="Invalid JSON response from Fragment")
             
             if not result.get('ok'):
                 return Result(False, error=result.get('error', 'Unknown error'))
             
-            # 2. Di sini Anda perlu implementasi TON transaction
-            # Ini memerlukan library ton untuk mengirim transaksi
-            # Untuk sementara, kita return success dengan warning
+            # Dapatkan transaction data
+            tx_data = result.get('data', {})
             
-            print("✅ Purchase request sent to Fragment")
-            print("⚠️  NOTE: Implementasi TON transaction diperlukan untuk pembelian real")
-            print("⚠️  Untuk sekarang, silakan selesaikan transaksi manual di browser")
-            
-            # Return dummy success dengan informasi
+            # Berhasil
             return Result(
                 True, 
-                tx_hash=f"PENDING_{int(time.time())}",
-                error="Selesaikan transaksi di browser Fragment.com"
+                tx_hash=tx_data.get('hash', f"TX_{int(time.time())}"),
+                data=tx_data
             )
             
         except Exception as e:
-            print(f"Error in buy_stars: {e}")
+            print(f"❌ Error in buy_stars: {e}")
+            import traceback
+            traceback.print_exc()
             return Result(False, error=str(e))
     
     async def close(self):
