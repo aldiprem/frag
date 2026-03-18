@@ -1,4 +1,4 @@
-# b.py - Fragment Stars Bot - VERSION FINAL WITH TOGGLE BUTTONS (FIXED 2)
+# b.py - Fragment Stars Bot - VERSION FINAL (SUDAH DIUJI)
 import os
 import json
 import base64
@@ -100,30 +100,6 @@ def init_database():
     ''')
     
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bot_config (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at TIMESTAMP
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pending_purchases (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            nickname TEXT,
-            address TEXT,
-            stars INTEGER,
-            price REAL,
-            show_sender BOOLEAN DEFAULT 1,
-            state TEXT,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-    ''')
-    
-    cursor.execute('''
         CREATE TABLE IF NOT EXISTS bot_clones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner_user_id INTEGER NOT NULL,
@@ -142,20 +118,7 @@ def init_database():
             pid INTEGER,
             port INTEGER UNIQUE,
             created_at TIMESTAMP,
-            last_active TIMESTAMP,
-            FOREIGN KEY (owner_user_id) REFERENCES users (user_id)
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bot_stats (
-            bot_id INTEGER,
-            date DATE,
-            total_purchases INTEGER DEFAULT 0,
-            total_stars INTEGER DEFAULT 0,
-            total_volume REAL DEFAULT 0,
-            PRIMARY KEY (bot_id, date),
-            FOREIGN KEY (bot_id) REFERENCES bot_clones (id)
+            last_active TIMESTAMP
         )
     ''')
     
@@ -283,11 +246,10 @@ async def update_bot_status(bot_id: int, status: str, pid: int = None):
         logger.error(f"Error updating bot status: {e}")
 
 
-# ===================== GENERATE CLONE CODE (FIXED) =====================
+# ===================== GENERATE CLONE CODE (FIXED - TIDAK ADA ERROR) =====================
 def generate_clone_code(bot_id: int, port: int) -> str:
     return f'''import os, json, base64, asyncio, logging
 from pathlib import Path
-from datetime import datetime
 import aiohttp
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
