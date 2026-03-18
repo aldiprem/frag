@@ -1,4 +1,4 @@
-# b.py - Fragment Stars Bot - VERSION FINAL WITH TOGGLE BUTTONS
+# b.py - Fragment Stars Bot - VERSION FINAL WITH TOGGLE BUTTONS (FIXED)
 import os
 import json
 import base64
@@ -283,6 +283,7 @@ async def update_bot_status(bot_id: int, status: str, pid: int = None):
         logger.error(f"Error updating bot status: {e}")
 
 
+# ===================== GENERATE CLONE CODE (FIXED) =====================
 def generate_clone_code(bot_id: int, port: int) -> str:
     return f'''import os, json, base64, asyncio, logging
 from pathlib import Path
@@ -324,7 +325,7 @@ async def encoded(encoded_string: str) -> str:
         return encoded_string
 
 
-async def post(data: dict) -> Optional[dict]:
+async def post(data: dict) -> dict:
     params = {{"hash": HASH}}
     headers = {{
         "accept": "application/json",
@@ -341,19 +342,19 @@ async def post(data: dict) -> Optional[dict]:
         return None
 
 
-async def get_user_address(username: str) -> Optional[dict]:
+async def get_user_address(username: str) -> dict:
     return await post({{"query": username, "method": "searchStarsRecipient"}})
 
 
-async def init_buy_stars(recipient: str, quantity: int) -> Optional[dict]:
+async def init_buy_stars(recipient: str, quantity: int) -> dict:
     return await post({{"recipient": recipient, "quantity": quantity, "method": "initBuyStarsRequest"}})
 
 
-async def get_buy_stars(req_id: str, show_sender: str = "1") -> Optional[dict]:
+async def get_buy_stars(req_id: str, show_sender: str = "1") -> dict:
     return await post({{"transaction": "1", "id": req_id, "show_sender": show_sender, "method": "getBuyStarsLink"}})
 
 
-async def send_transfer(address: str, amount: int, payload: str) -> Optional[str]:
+async def send_transfer(address: str, amount: int, payload: str) -> str:
     try:
         client = TonapiClient(api_key=WALLET_API_KEY, is_testnet=False)
         wallet, _, _, _ = WalletV5R1.from_mnemonic(client, WALLET_MNEMONIC)
@@ -365,7 +366,7 @@ async def send_transfer(address: str, amount: int, payload: str) -> Optional[str
         return None
 
 
-async def pay_stars_order(username: str, quantity: int, show_sender: bool = True) -> Optional[str]:
+async def pay_stars_order(username: str, quantity: int, show_sender: bool = True) -> str:
     try:
         user = await get_user_address(username)
         if not user or not user.get("found"): return None
@@ -578,6 +579,7 @@ if __name__ == '__main__':
 '''
 
 
+# ===================== FUNGSI START/STOP BOT CLONE =====================
 async def start_bot_clone(bot_id: int) -> bool:
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -591,6 +593,7 @@ async def start_bot_clone(bot_id: int) -> bool:
         conn.close()
         
         if not data:
+            logger.error(f"Bot {bot_id} not found")
             return False
         
         (token, api_id, api_hash, cookies, hash, wallet_key,
@@ -629,6 +632,7 @@ PORT={port}
         await asyncio.sleep(2)
         if proc.poll() is None:
             await update_bot_status(bot_id, 'running', proc.pid)
+            logger.info(f"✅ Bot {bot_id} started with PID {proc.pid}")
             return True
         
         with open(bot_dir / "stderr.log", "r") as f:
@@ -661,6 +665,7 @@ async def stop_bot_clone(bot_id: int) -> bool:
                 pass
         
         await update_bot_status(bot_id, 'stopped')
+        logger.info(f"✅ Bot {bot_id} stopped")
         return True
     except Exception as e:
         logger.error(f"Error stopping bot {bot_id}: {e}")
