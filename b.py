@@ -1,4 +1,4 @@
-# b.py - Fragment Stars Bot - VERSION FINAL WITH TOGGLE BUTTONS (FIXED)
+# b.py - Fragment Stars Bot - VERSION FINAL WITH TOGGLE BUTTONS (FIXED 2)
 import os
 import json
 import base64
@@ -393,7 +393,7 @@ async def pay_stars_order(username: str, quantity: int, show_sender: bool = True
         return None
 
 
-bot = TelegramClient(f'bot_clone_{{BOT_ID}}', API_ID, API_HASH)
+bot = TelegramClient(f'bot_clone_{BOT_ID}', API_ID, API_HASH)
 user_states, user_data = {{}}, {{}}
 STATE_IDLE, STATE_WAITING_USERNAME, STATE_WAITING_STARS = "idle", "waiting_username", "waiting_stars"
 STATE_WAITING_SENDER_OPTION, STATE_CONFIRM_PURCHASE = "waiting_sender_option", "confirm_purchase"
@@ -566,16 +566,16 @@ async def cancel_purchase(event, user_id: int):
 
 
 async def main():
-    logger.info(f"Starting bot clone {{BOT_ID}}...")
+    logger.info(f"Starting bot clone {BOT_ID}...")
     await bot.start(bot_token=BOT_TOKEN)
-    logger.info(f"✅ Bot clone {{BOT_ID}} running")
+    logger.info(f"✅ Bot clone {BOT_ID} running")
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info(f"Bot clone {{BOT_ID}} stopped")
+        logger.info(f"Bot clone {BOT_ID} stopped")
 '''
 
 
