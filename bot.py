@@ -1,567 +1,1375 @@
-#!/usr/bin/env python3
-"""
-Telegram Stars Bot - Auto Buy Telegram Stars via Fragment.com
-Menggunakan fragment-api-py official
-"""
-
+# b.py - Fragment Stars Bot - VERSION ALL-IN-ONE WITH DATABASE
 import os
-import sys
+import json
+import base64
 import asyncio
 import logging
-from datetime import datetime
+import sqlite3
+from pathlib import Path
 from typing import Optional, Dict, Any
-from dataclasses import dataclass
-
+from datetime import datetime
+from telethon.extensions.markdown import DEFAULT_DELIMITERS
+from telethon.tl.types import MessageEntityBlockquote
+import aiohttp
+from aiohttp import ClientResponse, ClientConnectorError
+from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
-from telethon.tl.types import User
-from telethon.errors import FloodWaitError
 
-# Import dari fragment-api-py yang sudah terinstall
-from fragment_api_py import AsyncFragmentAPI, FragmentAPIError
+# Import tonutils
+from tonutils.client import TonapiClient
+from tonutils.utils import to_amount
+from tonutils.wallet import WalletV5R1
 
-from config import Config, logger
+# ===================== LOAD ENVIRONMENT VARIABLES =====================
+env_path = Path('.') / '.env'
+load_dotenv(dotenv_path=env_path)
+print(f"Loading .env from: {env_path.absolute()}")
+print(f"File exists: {env_path.exists()}")
 
-# ==================== DATA CLASSES ====================
+# ===================== KONFIGURASI =====================
+API_ID = int(os.getenv("API_ID", 0))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-@dataclass
-class UserState:
-    """Menyimpan state user sementara"""
-    step: str  # 'username', 'amount', 'confirm'
-    username: str = ''
-    amount: int = 0
-    user_entity: Any = None
-    timestamp: float = 0
+ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]
 
-# ==================== BOT CLASS ====================
+PRICE_PER_STAR = float(os.getenv("PRICE_PER_STAR", 0.01))
+MIN_STARS = int(os.getenv("MIN_STARS", 10))
+MAX_STARS = int(os.getenv("MAX_STARS", 100000))
+DEFAULT_DELIMITERS['^^'] = lambda *a, **k: MessageEntityBlockquote(*a, **k, collapsed=True)
+COOKIES = os.getenv("COOKIES", "")
+HASH = os.getenv("HASH", "")
 
-class StarsBot:
-    """Main bot class"""
+WALLET_API_KEY = os.getenv("WALLET_API_KEY", "")
+WALLET_MNEMONIC_STR = os.getenv("WALLET_MNEMONIC", "[]")
+
+try:
+    WALLET_MNEMONIC = json.loads(WALLET_MNEMONIC_STR)
+    print(f"✅ Loaded {len(WALLET_MNEMONIC)} mnemonic words")
+except Exception as e:
+    print(f"❌ Failed to parse WALLET_MNEMONIC: {e}")
+    WALLET_MNEMONIC = []
+
+# Database configuration
+DB_PATH = "frag.db"
+
+# Logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ===================== DATABASE FUNCTIONS =====================
+
+def init_database():
+    """Inisialisasi database SQLite3."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
     
-    def __init__(self):
-        self.client = None
-        self.fragment_api = None
-        self.user_states: Dict[int, UserState] = {}
-        self.start_time = datetime.now()
-        self.total_purchases = 0
-        self.total_stars = 0
-        
-    async def init_fragment_api(self) -> bool:
-        """Inisialisasi Fragment API"""
-        try:
-            logger.info("🔄 Inisialisasi Fragment API...")
-            
-            wallet_mnemonic = None
-            if Config.WALLET_MNEMONIC and not Config.WALLET_MNEMONIC.startswith('abandon'):
-                wallet_mnemonic = Config.WALLET_MNEMONIC
-            
-            # Inisialisasi API
-            self.fragment_api = AsyncFragmentAPI(
-                cookies=Config.FRAGMENT_COOKIES,
-                hash_value=Config.FRAGMENT_HASH,
-                wallet_mnemonic=wallet_mnemonic,
-                wallet_api_key=Config.TON_API_KEY if Config.TON_API_KEY != 'your_ton_api_key_here' else None,
-                wallet_version=Config.WALLET_VERSION
-            )
-            
-            # Test koneksi
-            try:
-                # Cek apakah bisa connect
-                test = await self.fragment_api.get_recipient_stars('telegram')
-                logger.info("✅ Connected to Fragment.com")
-                
-                # Cek wallet balance
-                balance = await self.fragment_api.get_wallet_balance()
-                logger.info(f"💰 Wallet Balance: {balance.get('balance', '0')} TON")
-                logger.info(f"🏦 Wallet Address: {balance.get('address', 'Unknown')}")
-                
-                return True
-                
-            except Exception as e:
-                logger.warning(f"⚠️ Could not get wallet info: {e}")
-                logger.info("✅ Fragment API siap (mode terbatas)")
-                return True
-                
-        except Exception as e:
-            logger.error(f"❌ Gagal init Fragment API: {e}")
-            return False
+    # Tabel untuk menyimpan data pengguna
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            is_admin BOOLEAN DEFAULT 0,
+            first_seen TIMESTAMP,
+            last_seen TIMESTAMP
+        )
+    ''')
     
-    async def start(self):
-        """Start the bot"""
-        print("\n" + "="*60)
-        print("🚀 TELEGRAM STARS BOT - AUTO BUY VIA FRAGMENT")
-        print("="*60)
-        
-        # Validasi config
-        errors, warnings = Config.validate()
-        
-        if errors:
-            print("\n❌ ERROR KONFIGURASI:")
-            for error in errors:
-                print(f"  {error}")
-            print("\n📝 Silakan perbaiki file .env terlebih dahulu!")
-            return
-        
-        if warnings:
-            print("\n⚠️ PERINGATAN:")
-            for warning in warnings:
-                print(f"  {warning}")
-        
-        Config.display_config()
-        
-        # Inisialisasi Fragment API
-        if not await self.init_fragment_api():
-            print("\n❌ Gagal inisialisasi Fragment API. Bot tidak bisa jalan.")
-            return
-        
-        # Inisialisasi Telegram Client
-        print("\n🔄 Menghubungkan ke Telegram...")
-        self.client = TelegramClient('stars_bot_session', Config.API_ID, Config.API_HASH)
-        
-        # Register handlers
-        self.register_handlers()
-        
-        try:
-            await self.client.start(bot_token=Config.BOT_TOKEN)
-            
-            # Get bot info
-            me = await self.client.get_me()
-            print(f"\n✅ Bot started successfully!")
-            print(f"🤖 Bot: @{me.username}")
-            print(f"📅 Started at: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-            print("-"*60)
-            print("Commands: /start, /buy, /balance, /stats, /help")
-            print("="*60 + "\n")
-            
-            await self.client.run_until_disconnected()
-            
-        except Exception as e:
-            logger.error(f"Fatal error: {e}")
-        finally:
-            await self.cleanup()
+    # Tabel untuk menyimpan riwayat pembelian
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            recipient_username TEXT,
+            recipient_nickname TEXT,
+            stars_amount INTEGER,
+            price_ton REAL,
+            tx_hash TEXT,
+            show_sender BOOLEAN,
+            status TEXT,
+            error_message TEXT,
+            timestamp TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    ''')
     
-    def register_handlers(self):
-        """Register all event handlers"""
-        
-        @self.client.on(events.NewMessage(pattern='/start'))
-        async def start_handler(event):
-            await self.handle_start(event)
-        
-        @self.client.on(events.NewMessage(pattern='/buy'))
-        async def buy_handler(event):
-            await self.handle_buy(event)
-        
-        @self.client.on(events.NewMessage(pattern='/balance'))
-        async def balance_handler(event):
-            await self.handle_balance(event)
-        
-        @self.client.on(events.NewMessage(pattern='/stats'))
-        async def stats_handler(event):
-            await self.handle_stats(event)
-        
-        @self.client.on(events.NewMessage(pattern='/help'))
-        async def help_handler(event):
-            await self.handle_help(event)
-        
-        @self.client.on(events.NewMessage(pattern='/cancel'))
-        async def cancel_handler(event):
-            await self.handle_cancel(event)
-        
-        @self.client.on(events.CallbackQuery)
-        async def callback_handler(event):
-            await self.handle_callback(event)
-        
-        @self.client.on(events.NewMessage)
-        async def message_handler(event):
-            if event.message.text and not event.message.text.startswith('/'):
-                await self.handle_user_input(event)
+    # Tabel untuk menyimpan log aktivitas
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT,
+            details TEXT,
+            ip_address TEXT,
+            timestamp TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    ''')
     
-    # ==================== COMMAND HANDLERS ====================
+    # Tabel untuk menyimpan konfigurasi bot
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_config (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP
+        )
+    ''')
     
-    async def handle_start(self, event):
-        """Handler untuk /start"""
-        user = await event.get_sender()
-        
-        welcome_text = f"""
-🌟 **SELAMAT DATANG DI STARS BOT** 🌟
-
-Halo {user.first_name}! Saya adalah bot pembeli Telegram Stars otomatis via Fragment.com.
-
-✨ **Fitur Utama:**
-• Beli Telegram Stars untuk user lain
-• Cek saldo wallet TON
-• Auto-konfirmasi transaksi
-• Aman dan cepat
-
-📌 **Cara Penggunaan:**
-1️⃣ Ketik /buy untuk mulai beli Stars
-2️⃣ Masukkan username penerima
-3️⃣ Masukkan jumlah Stars
-4️⃣ Konfirmasi pembelian
-
-💰 **Batasan:**
-• Min: {Config.MIN_STARS} Stars
-• Max: {Config.MAX_STARS} Stars
-
-📚 **Command List:**
-/start - Tampilkan pesan ini
-/buy - Beli Telegram Stars
-/balance - Cek saldo wallet
-/stats - Statistik bot
-/help - Bantuan lengkap
-/cancel - Batalkan proses
-
-⚠️ Pastikan wallet TON Anda memiliki saldo cukup!
-        """
-        
-        buttons = [
-            [Button.inline("🛒 BELI STARS", b"buy")],
-            [Button.inline("💰 CEK SALDO", b"balance"), 
-             Button.inline("📊 STATS", b"stats")],
-            [Button.inline("❓ BANTUAN", b"help")]
-        ]
-        
-        await event.reply(welcome_text, buttons=buttons, parse_mode='markdown')
+    # Tabel untuk menyimpan sesi pembelian yang belum selesai
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pending_purchases (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            nickname TEXT,
+            address TEXT,
+            stars INTEGER,
+            price REAL,
+            show_sender BOOLEAN DEFAULT 1,
+            state TEXT,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    ''')
     
-    async def handle_buy(self, event):
-        """Handler untuk /buy"""
-        user_id = event.sender_id
+    conn.commit()
+    conn.close()
+    logger.info("✅ Database initialized successfully")
+
+
+async def save_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None):
+    """Simpan atau update data pengguna."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         
-        # Buat state baru
-        self.user_states[user_id] = UserState(
-            step='username',
-            timestamp=datetime.now().timestamp()
+        # Cek apakah user sudah ada
+        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        existing = cursor.fetchone()
+        
+        now = datetime.now().isoformat()
+        is_admin = 1 if user_id in ADMIN_IDS else 0
+        
+        if existing:
+            # Update last_seen
+            cursor.execute('''
+                UPDATE users 
+                SET username = ?, first_name = ?, last_name = ?, last_seen = ?, is_admin = ?
+                WHERE user_id = ?
+            ''', (username, first_name, last_name, now, is_admin, user_id))
+        else:
+            # Insert new user
+            cursor.execute('''
+                INSERT INTO users (user_id, username, first_name, last_name, is_admin, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, username, first_name, last_name, is_admin, now, now))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error saving user to database: {e}")
+
+
+async def log_activity(user_id: int, action: str, details: str = None, ip: str = None):
+    """Catat aktivitas pengguna."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO activity_log (user_id, action, details, ip_address, timestamp)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, action, details, ip, datetime.now().isoformat()))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error logging activity: {e}")
+
+
+async def save_purchase(
+    user_id: int, 
+    recipient_username: str, 
+    recipient_nickname: str, 
+    stars_amount: int, 
+    price_ton: float,
+    tx_hash: str = None,
+    show_sender: bool = True,
+    status: str = "pending",
+    error_message: str = None
+):
+    """Simpan riwayat pembelian."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO purchases 
+            (user_id, recipient_username, recipient_nickname, stars_amount, price_ton, 
+             tx_hash, show_sender, status, error_message, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user_id, recipient_username, recipient_nickname, stars_amount, price_ton,
+            tx_hash, show_sender, status, error_message, datetime.now().isoformat()
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        # Log aktivitas pembelian
+        await log_activity(
+            user_id, 
+            "purchase", 
+            f"Stars: {stars_amount}, Recipient: @{recipient_username}, Status: {status}"
         )
         
-        msg = """
-🛒 **PROSES PEMBELIAN STARS**
+    except Exception as e:
+        logger.error(f"Error saving purchase: {e}")
 
-Langkah 1/3: Masukkan username Telegram penerima
 
-📝 **Contoh:**
-• @username
-• username (tanpa @)
-
-Ketik /cancel untuk membatalkan
-        """
+async def save_pending_purchase(
+    user_id: int,
+    username: str,
+    nickname: str,
+    address: str,
+    stars: int,
+    price: float,
+    show_sender: bool = True,
+    state: str = None
+):
+    """Simpan sesi pembelian yang belum selesai."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         
-        await event.reply(msg, parse_mode='markdown')
+        now = datetime.now().isoformat()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO pending_purchases 
+            (user_id, username, nickname, address, stars, price, show_sender, state, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(
+                (SELECT created_at FROM pending_purchases WHERE user_id = ?), ?
+            ), ?)
+        ''', (
+            user_id, username, nickname, address, stars, price, show_sender, state,
+            user_id, now, now
+        ))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error saving pending purchase: {e}")
+
+
+async def get_pending_purchase(user_id: int) -> Optional[Dict]:
+    """Ambil sesi pembelian yang belum selesai."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT username, nickname, address, stars, price, show_sender, state
+            FROM pending_purchases WHERE user_id = ?
+        ''', (user_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'username': row[0],
+                'nickname': row[1],
+                'address': row[2],
+                'stars': row[3],
+                'price': row[4],
+                'show_sender': bool(row[5]),
+                'state': row[6]
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Error getting pending purchase: {e}")
+        return None
+
+
+async def delete_pending_purchase(user_id: int):
+    """Hapus sesi pembelian yang sudah selesai/dibatalkan."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM pending_purchases WHERE user_id = ?', (user_id,))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error deleting pending purchase: {e}")
+
+
+async def update_bot_config(key: str, value: str):
+    """Update konfigurasi bot."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO bot_config (key, value, updated_at)
+            VALUES (?, ?, ?)
+        ''', (key, value, datetime.now().isoformat()))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error updating bot config: {e}")
+
+
+async def get_bot_config(key: str) -> Optional[str]:
+    """Ambil konfigurasi bot."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT value FROM bot_config WHERE key = ?', (key,))
+        row = cursor.fetchone()
+        
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error(f"Error getting bot config: {e}")
+        return None
+
+
+async def get_user_stats(user_id: int) -> Dict:
+    """Dapatkan statistik pengguna."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Total pembelian
+        cursor.execute('''
+            SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
+            FROM purchases WHERE user_id = ? AND status = 'success'
+        ''', (user_id,))
+        total_purchases, total_stars, total_spent = cursor.fetchone()
+        
+        # Pembelian hari ini
+        today = datetime.now().date().isoformat()
+        cursor.execute('''
+            SELECT COUNT(*)
+            FROM purchases 
+            WHERE user_id = ? AND status = 'success' AND DATE(timestamp) = ?
+        ''', (user_id, today))
+        today_purchases = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        return {
+            'total_purchases': total_purchases or 0,
+            'total_stars': total_stars or 0,
+            'total_spent': total_spent or 0,
+            'today_purchases': today_purchases or 0
+        }
+    except Exception as e:
+        logger.error(f"Error getting user stats: {e}")
+        return {
+            'total_purchases': 0,
+            'total_stars': 0,
+            'total_spent': 0,
+            'today_purchases': 0
+        }
+
+
+async def get_all_stats() -> Dict:
+    """Dapatkan statistik keseluruhan bot."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Total user
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total_users = cursor.fetchone()[0]
+        
+        # User aktif hari ini
+        today = datetime.now().date().isoformat()
+        cursor.execute('''
+            SELECT COUNT(DISTINCT user_id) FROM activity_log 
+            WHERE DATE(timestamp) = ? AND action != 'system'
+        ''', (today,))
+        active_today = cursor.fetchone()[0]
+        
+        # Total pembelian
+        cursor.execute('''
+            SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
+            FROM purchases WHERE status = 'success'
+        ''')
+        total_purchases, total_stars, total_volume = cursor.fetchone()
+        
+        # Pembelian hari ini
+        cursor.execute('''
+            SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
+            FROM purchases WHERE status = 'success' AND DATE(timestamp) = ?
+        ''', (today,))
+        today_purchases, today_stars, today_volume = cursor.fetchone()
+        
+        conn.close()
+        
+        return {
+            'total_users': total_users or 0,
+            'active_today': active_today or 0,
+            'total_purchases': total_purchases or 0,
+            'total_stars': total_stars or 0,
+            'total_volume': total_volume or 0,
+            'today_purchases': today_purchases or 0,
+            'today_stars': today_stars or 0,
+            'today_volume': today_volume or 0
+        }
+    except Exception as e:
+        logger.error(f"Error getting all stats: {e}")
+        return {}
+
+
+# ===================== FRAGMENT API FUNCTIONS =====================
+
+async def encoded(encoded_string: str) -> str:
+    """Decode base64 string."""
+    if not encoded_string:
+        return ""
     
-    async def handle_balance(self, event):
-        """Handler untuk /balance"""
-        try:
-            if not self.fragment_api:
-                await event.reply("❌ Fragment API tidak tersedia")
-                return
+    missing_padding = len(encoded_string) % 4
+    if missing_padding != 0:
+        encoded_string += "=" * (4 - missing_padding)
+
+    try:
+        decoded_bytes = base64.b64decode(encoded_string)
+        decoded_string = decoded_bytes.decode("utf-8", errors="ignore")
+        return decoded_string
+    except Exception as e:
+        logger.error(f"Error decoding: {e}")
+        return encoded_string
+
+
+async def post(cookies: str, _hash: str, data: dict) -> Optional[dict]:
+    """POST request ke Fragment API."""
+    params = {"hash": _hash}
+    
+    if not cookies or not isinstance(cookies, str):
+        logger.error("Invalid cookies format")
+        return None
+
+    headers = {
+        "accept": "application/json, text/javascript, */*; q=0.01",
+        "accept-language": "en-US,en;q=0.9",
+        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "origin": "https://fragment.com",
+        "referer": "https://fragment.com/",
+        "cookie": cookies.strip(),
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "x-requested-with": "XMLHttpRequest",
+    }
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                "https://fragment.com/api", 
+                params=params, 
+                headers=headers, 
+                data=data
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    text = await response.text()
+                    logger.error(f"HTTP {response.status}: {text[:200]}")
+                    return None
+                        
+    except Exception as e:
+        logger.error(f"Connection error: {e}")
+        return None
+
+
+async def get_user_address(username: str) -> Optional[dict]:
+    """Cari user di Fragment."""
+    try:
+        data = {
+            "query": username,
+            "quantity": "",
+            "method": "searchStarsRecipient",
+        }
+        return await post(COOKIES, HASH, data)
+    except Exception as e:
+        logger.error(f"Error in get_user_address: {e}")
+        return None
+
+
+async def init_buy_stars(recipient: str, quantity: int) -> Optional[dict]:
+    """Inisialisasi pembelian stars."""
+    try:
+        data = {
+            "recipient": recipient,
+            "quantity": quantity,
+            "method": "initBuyStarsRequest",
+        }
+        return await post(COOKIES, HASH, data)
+    except Exception as e:
+        logger.error(f"Error in init_buy_stars: {e}")
+        return None
+
+
+async def get_buy_stars(req_id: str, show_sender: str = "1") -> Optional[dict]:
+    """Dapatkan detail pembayaran dengan opsi show_sender."""
+    try:
+        data = {
+            "transaction": "1",
+            "id": req_id,
+            "show_sender": show_sender,
+            "method": "getBuyStarsLink",
+        }
+        return await post(COOKIES, HASH, data)
+    except Exception as e:
+        logger.error(f"Error in get_buy_stars: {e}")
+        return None
+
+
+# ===================== WALLET FUNCTIONS =====================
+
+async def send_transfer(address: str, amount: int, payload: str) -> Optional[str]:
+    """Kirim transfer TON."""
+    try:
+        client = TonapiClient(api_key=WALLET_API_KEY, is_testnet=False)
+        wallet, _, _, _ = WalletV5R1.from_mnemonic(client, WALLET_MNEMONIC)
+
+        # Convert amount from nano TON to TON
+        amount_in_ton = amount / 1_000_000_000
+        logger.info(f"Sending {amount_in_ton} TON to {address}")
+        
+        tx_hash = await wallet.transfer(
+            destination=address,
+            amount=amount_in_ton,
+            body=payload,
+        )
+        return tx_hash
+    except Exception as e:
+        logger.error(f"Error in send_transfer: {e}")
+        return None
+
+
+async def get_balance() -> float:
+    """Dapatkan saldo wallet."""
+    try:
+        client = TonapiClient(api_key=WALLET_API_KEY, is_testnet=False)
+        wallet, _, _, _ = WalletV5R1.from_mnemonic(client, WALLET_MNEMONIC)
+        balance = await wallet.balance()
+        return float(balance)
+    except Exception as e:
+        logger.error(f"Error in get_balance: {e}")
+        return 0.0
+
+
+# ===================== WRAPPER FUNCTIONS =====================
+
+async def get_user(username: str) -> Optional[dict]:
+    """Dapatkan informasi user dari Fragment."""
+    try:
+        logger.info(f"Searching for user: {username}")
+        user = await get_user_address(username)
+        
+        if user and user.get("found"):
+            nickname = user.get("found").get("name")
+            address = user.get("found").get("recipient")
+            if nickname and address:
+                logger.info(f"Found user: {nickname}")
+                return {"nickname": nickname, "address": address}
+        return None
+    except Exception as e:
+        logger.error(f"Error in get_user: {e}")
+        return None
+
+
+async def pay_stars_order(username: str, quantity: int, show_sender: bool = True) -> Optional[str]:
+    """Proses pembayaran stars dengan opsi menampilkan/menyembunyikan pengirim."""
+    try:
+        logger.info(f"Starting payment for @{username} - {quantity} stars (show_sender={show_sender})")
+        
+        # 1. Cari user
+        user = await get_user_address(username)
+        if not user or not user.get("found"):
+            logger.error("User not found")
+            return None
             
-            balance = await self.fragment_api.get_wallet_balance()
+        address = user.get("found").get("recipient")
+        if not address:
+            logger.error("Invalid user address")
+            return None
+
+        # 2. Init buy
+        init = await init_buy_stars(address, quantity)
+        if not init:
+            logger.error("Failed to init buy")
+            return None
             
-            msg = f"""
-💰 **INFORMASI WALLET**
+        req_id = init.get("req_id")
+        if not req_id:
+            logger.error("No req_id in response")
+            return None
 
-**Balance:** `{balance.get('balance', '0')} TON`
-**Address:** `{balance.get('address', 'Unknown')}`
-**Version:** `{balance.get('wallet_version', Config.WALLET_VERSION)}`
-
-💡 Gunakan /buy untuk membeli Stars
-            """
+        # 3. Get buy details dengan parameter show_sender
+        show_sender_value = "1" if show_sender else "0"
+        
+        buy = await get_buy_stars(req_id, show_sender_value)
+        if not buy:
+            logger.error("Failed to get buy details")
+            return None
             
-            await event.reply(msg, parse_mode='markdown')
+        # 4. Parse transaction data
+        messages = buy.get("transaction", {}).get("messages", [])
+        if not messages:
+            logger.error("No messages in transaction")
+            return None
             
-        except Exception as e:
-            logger.error(f"Balance error: {e}")
-            await event.reply("❌ Gagal mendapatkan informasi saldo")
-    
-    async def handle_stats(self, event):
-        """Handler untuk /stats"""
-        uptime = datetime.now() - self.start_time
-        hours, remainder = divmod(int(uptime.total_seconds()), 3600)
-        minutes, seconds = divmod(remainder, 60)
+        pay_address = messages[0].get("address")
+        amount = messages[0].get("amount")
+        payload = messages[0].get("payload")
+
+        if not all([pay_address, amount, payload]):
+            logger.error("Missing transaction data")
+            return None
+
+        # 5. Decode payload
+        decoded_payload = await encoded(payload)
+
+        # 6. Send transfer
+        tx_hash = await send_transfer(pay_address, int(amount), decoded_payload)
+
+        if tx_hash:
+            logger.info(f"Transaction successful: {tx_hash}")
+            return tx_hash
+        return None
         
-        msg = f"""
-📊 **STATISTIK BOT**
+    except Exception as e:
+        logger.error(f"Error in pay_stars_order: {e}")
+        return None
 
-**Uptime:** {hours}h {minutes}m {seconds}s
-**Total Pembelian:** {self.total_purchases}
-**Total Stars:** {self.total_stars} ⭐
-**User Active:** {len(self.user_states)}
 
-**Status Fragment:** {'✅ Online' if self.fragment_api else '❌ Offline'}
-**Wallet Version:** {Config.WALLET_VERSION}
+# ===================== BOT INITIALIZATION =====================
+print("Starting bot...")
+bot = TelegramClient('fragment_bot_session', API_ID, API_HASH)
 
-🕐 Started: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}
-        """
-        
-        await event.reply(msg, parse_mode='markdown')
+# State management
+user_states: Dict[int, str] = {}
+user_data: Dict[int, Dict[str, Any]] = {}
+
+STATE_IDLE = "idle"
+STATE_WAITING_USERNAME = "waiting_username"
+STATE_WAITING_STARS = "waiting_stars"
+STATE_WAITING_SENDER_OPTION = "waiting_sender_option"
+STATE_CONFIRM_PURCHASE = "confirm_purchase"
+
+
+# ===================== HELPER FUNCTIONS =====================
+
+async def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+
+async def check_config() -> tuple[bool, bool]:
+    fragment_ok = bool(COOKIES and HASH)
+    wallet_ok = bool(WALLET_API_KEY and WALLET_MNEMONIC)
+    return fragment_ok, wallet_ok
+
+
+def format_number(num: int) -> str:
+    return f"{num:,}".replace(",", ".")
+
+
+def calculate_price(stars: int) -> float:
+    return stars * PRICE_PER_STAR
+
+
+def clean_username(username: str) -> str:
+    return username.strip().replace('@', '')
+
+
+# ===================== HANDLERS =====================
+
+@bot.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
+    user = await event.get_sender()
+    user_id = event.sender_id
+    first_name = user.first_name or ""
+    last_name = user.last_name or ""
+    fullname = f"{first_name} {last_name}"
+    username = user.username or "-"
     
-    async def handle_help(self, event):
-        """Handler untuk /help"""
-        help_text = """
-📚 **BANTUAN LENGKAP**
-
-**📋 COMMANDS:**
-/start - Mulai bot
-/buy - Beli Telegram Stars
-/balance - Cek saldo wallet
-/stats - Lihat statistik
-/help - Tampilkan bantuan ini
-/cancel - Batalkan proses
-
-**🛒 CARA BELI STARS:**
-1. Ketik /buy
-2. Masukkan username (contoh: @username)
-3. Masukkan jumlah Stars (min 1, max 1000)
-4. Konfirmasi pembelian
-5. Tunggu proses selesai
-
-**⚠️ PENTING:**
-• Pastikan wallet TON memiliki saldo
-• Proses bisa memakan waktu 1-2 menit
-• Transaction hash akan ditampilkan setelah sukses
-
-**❓ PROBLEM:**
-• "Insufficient balance" → Top up wallet TON
-• "Invalid username" → Username tidak ditemukan
-• "Transaction failed" → Coba lagi nanti
-
-Ada pertanyaan lain? Hubungi @support
-        """
-        
-        await event.reply(help_text, parse_mode='markdown')
+    # Simpan user ke database
+    await save_user(
+        user_id=user_id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name
+    )
     
-    async def handle_cancel(self, event):
-        """Handler untuk /cancel"""
-        user_id = event.sender_id
-        
-        if user_id in self.user_states:
-            del self.user_states[user_id]
-            await event.reply("❌ Proses dibatalkan. Ketik /buy untuk mulai lagi.")
-        else:
-            await event.reply("❌ Tidak ada proses aktif. Ketik /buy untuk mulai.")
+    # Log aktivitas
+    await log_activity(user_id, "start", "User started the bot")
     
-    # ==================== CALLBACK HANDLER ====================
+    fragment_ok, wallet_ok = await check_config()
     
-    async def handle_callback(self, event):
-        """Handler untuk button callbacks"""
-        data = event.data.decode()
-        user_id = event.sender_id
-        
-        if data == "buy":
-            await self.handle_buy(event)
-        elif data == "balance":
-            await self.handle_balance(event)
-        elif data == "stats":
-            await self.handle_stats(event)
-        elif data == "help":
-            await self.handle_help(event)
-        elif data.startswith("confirm_"):
-            await self.process_purchase(event, data)
-        elif data == "cancel":
-            if user_id in self.user_states:
-                del self.user_states[user_id]
-            await event.edit("❌ Pembelian dibatalkan.")
+    # Ambil statistik user
+    user_stats = await get_user_stats(user_id)
+
+    msg = """
+ Hallo  
+    """
     
-    # ==================== USER INPUT HANDLER ====================
+    welcome_text = (
+        f"🌟 **Selamat Datang di Fragment Stars Bot** 🌟\n\n"
+        f"Halo {user.first_name}!\n\n"
+        f"**Informasi:**\n"
+        f"• 💰 Harga: `{PRICE_PER_STAR}` TON per star\n"
+        f"• 📊 Minimal: `{MIN_STARS}` stars\n"
+        f"• 📈 Maksimal: `{MAX_STARS}` stars\n\n"
+        f"**Statistik Anda:**\n"
+        f"• Total Pembelian: {user_stats['total_purchases']}\n"
+        f"• Total Stars: {format_number(user_stats['total_stars'])}\n"
+        f"• Total Pengeluaran: {user_stats['total_spent']:.2f} TON\n\n"
+    )
     
-    async def handle_user_input(self, event):
-        """Handle input dari user"""
-        user_id = event.sender_id
-        text = event.message.text.strip()
-        
-        if user_id not in self.user_states:
+    if not fragment_ok:
+        welcome_text += "⚠️ **Fragment API tidak aktif**\n"
+    if not wallet_ok:
+        welcome_text += "⚠️ **Wallet tidak aktif**\n"
+    
+    buttons = [
+        [Button.inline("🛒 Beli Stars", data="buy")],
+        [Button.inline("ℹ️ Cara Pakai", data="howto")],
+        [Button.inline("📊 Statistik Saya", data="mystats")],
+    ]
+    
+    if await is_admin(user_id):
+        buttons.append([Button.inline("⚙️ Admin Panel", data="admin")])
+    
+    await event.respond(welcome_text, buttons=buttons, parse_mode='markdown')
+
+
+@bot.on(events.NewMessage(pattern='/buy'))
+async def buy_command(event):
+    user_id = event.sender_id
+    fragment_ok, wallet_ok = await check_config()
+    
+    await log_activity(user_id, "buy_command", "User initiated buy command")
+    
+    if not fragment_ok or not wallet_ok:
+        await event.respond("❌ **Bot belum siap digunakan**")
+        return
+    
+    # Hapus pending purchase sebelumnya
+    await delete_pending_purchase(user_id)
+    
+    user_states[user_id] = STATE_WAITING_USERNAME
+    user_data[user_id] = {}
+    
+    await event.respond(
+        "🛒 **Mulai Pembelian Stars**\n\n"
+        "Silakan masukkan **username** penerima:\n"
+        "_(Contoh: @username atau username)_\n\n"
+        "Ketik /cancel untuk membatalkan.",
+        parse_mode='markdown'
+    )
+
+
+@bot.on(events.NewMessage(pattern='/cancel'))
+async def cancel_command(event):
+    user_id = event.sender_id
+    
+    await log_activity(user_id, "cancel", "User cancelled operation")
+    
+    # Hapus pending purchase dari database
+    await delete_pending_purchase(user_id)
+    
+    if user_id in user_states:
+        del user_states[user_id]
+    if user_id in user_data:
+        del user_data[user_id]
+    
+    await event.respond(
+        "✅ **Operasi dibatalkan.**",
+        parse_mode='markdown'
+    )
+
+
+@bot.on(events.NewMessage(pattern='/stats'))
+async def stats_command(event):
+    user_id = event.sender_id
+    
+    user_stats = await get_user_stats(user_id)
+    
+    stats_text = (
+        "📊 **Statistik Pengguna**\n\n"
+        f"• Total Pembelian: {user_stats['total_purchases']}\n"
+        f"• Total Stars: {format_number(user_stats['total_stars'])}\n"
+        f"• Total Pengeluaran: {user_stats['total_spent']:.2f} TON\n"
+        f"• Pembelian Hari Ini: {user_stats['today_purchases']}"
+    )
+    
+    await event.respond(stats_text, parse_mode='markdown')
+    await log_activity(user_id, "stats", "User viewed their stats")
+
+
+@bot.on(events.CallbackQuery)
+async def callback_handler(event):
+    user_id = event.sender_id
+    data = event.data.decode('utf-8')
+    
+    # ===================== HANDLER UNTUK OPSI SENDER =====================
+    
+    # Handler untuk memilih TAMPILKAN NAMA (show_sender = True)
+    if data.startswith("sender_show_"):
+        user_data[user_id]['show_sender'] = True
+        # Simpan ke pending purchase
+        await save_pending_purchase(
+            user_id=user_id,
+            username=user_data[user_id]['username'],
+            nickname=user_data[user_id]['nickname'],
+            address=user_data[user_id]['address'],
+            stars=user_data[user_id]['stars'],
+            price=user_data[user_id]['price'],
+            show_sender=True,
+            state=STATE_WAITING_SENDER_OPTION
+        )
+        await show_confirmation(event, user_id)
+        await log_activity(user_id, "sender_option", "User chose to show sender name")
+        return
+    
+    # Handler untuk memilih SEMBUNYIKAN NAMA (show_sender = False)
+    elif data.startswith("sender_hide_"):
+        user_data[user_id]['show_sender'] = False
+        # Simpan ke pending purchase
+        await save_pending_purchase(
+            user_id=user_id,
+            username=user_data[user_id]['username'],
+            nickname=user_data[user_id]['nickname'],
+            address=user_data[user_id]['address'],
+            stars=user_data[user_id]['stars'],
+            price=user_data[user_id]['price'],
+            show_sender=False,
+            state=STATE_WAITING_SENDER_OPTION
+        )
+        await show_confirmation(event, user_id)
+        await log_activity(user_id, "sender_option", "User chose to hide sender name")
+        return
+    
+    # Handler untuk kembali ke opsi sender dari halaman konfirmasi
+    elif data.startswith("sender_back_"):
+        if user_id not in user_data:
+            await event.answer("Sesi telah berakhir, silakan mulai lagi.", alert=True)
             return
         
-        state = self.user_states[user_id]
-        
-        try:
-            if state.step == 'username':
-                await self.process_username_input(event, state, text)
-            elif state.step == 'amount':
-                await self.process_amount_input(event, state, text)
-                
-        except Exception as e:
-            logger.error(f"Input error for {user_id}: {e}")
-            await event.reply("❌ Terjadi error. Ketik /cancel dan coba lagi.")
-            if user_id in self.user_states:
-                del self.user_states[user_id]
+        # Kembali ke halaman pilihan sender
+        await ask_sender_option(event, user_id)
+        return
     
-    async def process_username_input(self, event, state, text):
-        """Proses input username"""
-        username = text.replace('@', '').strip()
+    # ===================== HANDLER UNTUK KONFIRMASI/CANCEL =====================
+    
+    elif data.startswith("confirm_"):
+        await confirm_purchase(event, user_id)
+        return
+    
+    elif data.startswith("cancel_"):
+        await cancel_purchase(event, user_id)
+        return
+    
+    # ===================== HANDLER UNTUK MENU UTAMA =====================
+    
+    elif data == "buy":
+        # Reset state untuk pembelian baru
+        user_states[user_id] = STATE_WAITING_USERNAME
+        user_data[user_id] = {}
+        await delete_pending_purchase(user_id)
+        await event.edit(
+            "🛒 **Mulai Pembelian Stars**\n\n"
+            "Silakan masukkan **username** penerima:\n"
+            "_(Contoh: @username atau username)_\n\n"
+            "Ketik /cancel untuk membatalkan.",
+            parse_mode='markdown'
+        )
+        await log_activity(user_id, "buy", "User started new purchase")
+    
+    elif data == "howto":
+        await event.edit(
+            "📖 **Cara Menggunakan Bot**\n\n"
+            "1️⃣ Klik 'Beli Stars' atau ketik /buy\n"
+            "2️⃣ Masukkan username penerima\n"
+            "3️⃣ Masukkan jumlah stars\n"
+            "4️⃣ Pilih opsi pengirim (Tampilkan/Sembunyikan nama)\n"
+            "5️⃣ Konfirmasi pembelian\n"
+            "6️⃣ Tunggu proses selesai\n\n"
+            "**Penting:**\n"
+            "• Pastikan wallet memiliki saldo cukup\n"
+            "• Transaksi tidak dapat dibatalkan\n\n"
+            "**Opsi Pengirim:**\n"
+            "• **Tampilkan nama** - Penerima melihat nama akun Fragment Anda\n"
+            "• **Sembunyikan (Gift)** - Muncul sebagai hadiah dari Telegram (anonim)",
+            buttons=[Button.inline("🔙 Kembali", data="start")],
+            parse_mode='markdown'
+        )
+        await log_activity(user_id, "howto", "User viewed how-to guide")
+    
+    elif data == "mystats":
+        user_stats = await get_user_stats(user_id)
         
-        if not username or len(username) < 3:
-            await event.reply("❌ Username tidak valid. Masukkan username yang benar:")
+        stats_text = (
+            "📊 **Statistik Anda**\n\n"
+            f"• Total Pembelian: {user_stats['total_purchases']}\n"
+            f"• Total Stars: {format_number(user_stats['total_stars'])}\n"
+            f"• Total Pengeluaran: {user_stats['total_spent']:.2f} TON\n"
+            f"• Pembelian Hari Ini: {user_stats['today_purchases']}\n\n"
+            f"_Terakhir update: {datetime.now().strftime('%H:%M:%S')}_"
+        )
+        
+        await event.edit(
+            stats_text,
+            buttons=[Button.inline("🔙 Kembali", data="start")],
+            parse_mode='markdown'
+        )
+        await log_activity(user_id, "mystats", "User viewed their stats")
+    
+    elif data == "admin":
+        if not await is_admin(user_id):
+            await event.answer("Akses ditolak!", alert=True)
             return
         
-        # Validasi user di Telegram
-        try:
-            entity = await self.client.get_entity(username)
-            
-            if not isinstance(entity, User):
-                await event.reply("❌ Username bukan milik user Telegram.")
-                return
-            
-            # Update state
-            state.username = username
-            state.user_entity = entity
-            state.step = 'amount'
-            
-            # Tampilkan info user
-            name = f"{entity.first_name} {entity.last_name or ''}".strip()
-            user_info = f"""
-✅ **USER DITEMUKAN!**
-
-**Nama:** {name}
-**Username:** @{username}
-**ID:** {entity.id}
-
-📝 Langkah 2/3: Masukkan jumlah Stars yang ingin dibeli
-(min: {Config.MIN_STARS}, max: {Config.MAX_STARS})
-
-Contoh: 100
-            """
-            
-            await event.reply(user_info, parse_mode='markdown')
-            
-        except FloodWaitError as e:
-            await event.reply(f"⚠️ Terlalu banyak request. Tunggu {e.seconds} detik.")
-        except Exception as e:
-            logger.error(f"User lookup error: {e}")
-            await event.reply("❌ Username tidak ditemukan di Telegram. Masukkan username valid:")
-    
-    async def process_amount_input(self, event, state, text):
-        """Proses input jumlah stars"""
-        try:
-            amount = int(text)
-            
-            if amount < Config.MIN_STARS or amount > Config.MAX_STARS:
-                await event.reply(f"❌ Jumlah harus antara {Config.MIN_STARS}-{Config.MAX_STARS}:")
-                return
-            
-            # Update state
-            state.amount = amount
-            state.step = 'confirm'
-            
-            # Tampilkan konfirmasi
-            confirm_msg = f"""
-🔄 **KONFIRMASI PEMBELIAN**
-
-**Penerima:** @{state.username}
-**Jumlah:** {amount} ⭐
-
-Apakah data sudah benar?
-            """
-            
-            buttons = [
-                [Button.inline("✅ YA, BELI", data=f"confirm_{amount}")],
-                [Button.inline("❌ BATAL", data="cancel")]
-            ]
-            
-            await event.reply(confirm_msg, buttons=buttons, parse_mode='markdown')
-            
-        except ValueError:
-            await event.reply(f"❌ Masukkan angka valid (1-{Config.MAX_STARS}):")
-    
-    # ==================== PURCHASE PROCESSOR ====================
-    
-    async def process_purchase(self, event, data):
-        """Proses pembelian Stars"""
-        user_id = event.sender_id
+        # Ambil statistik keseluruhan
+        stats = await get_all_stats()
         
-        if user_id not in self.user_states:
-            await event.edit("❌ Sesi telah berakhir. Ketik /buy untuk mulai lagi.")
+        admin_text = (
+            "⚙️ **Panel Admin**\n\n"
+            f"• Status: Aktif\n"
+            f"• Fragment API: {'✅' if COOKIES and HASH else '❌'}\n"
+            f"• Wallet: {'✅' if WALLET_API_KEY and WALLET_MNEMONIC else '❌'}\n\n"
+            f"**Statistik Bot:**\n"
+            f"• Total User: {stats['total_users']}\n"
+            f"• User Aktif Hari Ini: {stats['active_today']}\n"
+            f"• Total Pembelian: {stats['total_purchases']}\n"
+            f"• Total Stars: {format_number(stats['total_stars'])}\n"
+            f"• Total Volume: {stats['total_volume']:.2f} TON\n"
+            f"• Pembelian Hari Ini: {stats['today_purchases']}\n"
+            f"• Stars Hari Ini: {format_number(stats['today_stars'])}\n"
+            f"• Volume Hari Ini: {stats['today_volume']:.2f} TON\n\n"
+            f"• Pengguna Aktif Saat Ini: {len(user_states)}"
+        )
+        buttons = [
+            [Button.inline("💰 Cek Saldo", data="balance")],
+            [Button.inline("📊 Detail Statistik", data="admin_stats")],
+            [Button.inline("🔄 Restart Bot", data="restart")],
+            [Button.inline("🔙 Kembali", data="start")]
+        ]
+        await event.edit(admin_text, buttons=buttons, parse_mode='markdown')
+        await log_activity(user_id, "admin", "Admin accessed admin panel")
+    
+    elif data == "admin_stats":
+        if not await is_admin(user_id):
+            await event.answer("Akses ditolak!", alert=True)
             return
         
-        state = self.user_states[user_id]
+        # Ambil 10 pembelian terakhir
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT user_id, recipient_username, stars_amount, price_ton, status, timestamp
+            FROM purchases
+            ORDER BY timestamp DESC LIMIT 10
+        ''')
+        recent_purchases = cursor.fetchall()
+        conn.close()
         
-        # Update pesan ke processing
-        await event.edit("⏱️ **MEMPROSES PEMBELIAN...**\n\nMohon tunggu, transaksi sedang diproses.", parse_mode='markdown')
+        stats_text = "📊 **10 Pembelian Terakhir**\n\n"
+        for i, purchase in enumerate(recent_purchases, 1):
+            user_id, recipient, stars, price, status, ts = purchase
+            stats_text += f"{i}. User: {user_id}\n   → @{recipient}: {stars} stars ({price:.2f} TON)\n   Status: {status}\n   {ts[:19]}\n\n"
+        
+        await event.edit(
+            stats_text,
+            buttons=[Button.inline("🔙 Kembali", data="admin")],
+            parse_mode='markdown'
+        )
+    
+    elif data == "balance":
+        if not await is_admin(user_id):
+            await event.answer("Akses ditolak!", alert=True)
+            return
         
         try:
-            # Cek apakah wallet dikonfigurasi
-            if not self.fragment_api:
-                await event.edit("❌ **FRAGMENT API TIDAK TERSEDIA**")
+            await event.edit("⏳ **Mengambil saldo...**")
+            balance = await get_balance()
+            await event.edit(
+                f"💰 **Saldo Wallet**\n\n"
+                f"Saldo: `{balance:.2f}` TON\n\n"
+                f"_Update terakhir: {datetime.now().strftime('%H:%M:%S')}_",
+                buttons=[
+                    [Button.inline("🔄 Refresh", data="balance")],
+                    [Button.inline("🔙 Kembali", data="admin")]
+                ],
+                parse_mode='markdown'
+            )
+            await log_activity(user_id, "check_balance", f"Balance: {balance:.2f} TON")
+        except Exception as e:
+            logger.error(f"Error cek saldo: {e}")
+            await event.edit(
+                "❌ Gagal cek saldo",
+                buttons=[Button.inline("🔙 Kembali", data="admin")]
+            )
+    
+    elif data == "restart":
+        if not await is_admin(user_id):
+            await event.answer("Akses ditolak!", alert=True)
+            return
+        
+        # Reset semua state
+        user_states.clear()
+        user_data.clear()
+        
+        # Hapus semua pending purchases
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM pending_purchases')
+        conn.commit()
+        conn.close()
+        
+        await event.edit(
+            "✅ **Bot telah di-restart**\n\n"
+            "Semua sesi pengguna telah dihapus.",
+            buttons=[Button.inline("🏠 Kembali ke Menu", data="start")],
+            parse_mode='markdown'
+        )
+        await log_activity(user_id, "restart", "Bot was restarted by admin")
+    
+    elif data == "start":
+        await start_handler(event)
+    
+    # ===================== HANDLER UNTUK DATA TIDAK DIKENAL =====================
+    
+    else:
+        logger.warning(f"Unknown callback data: {data} from user {user_id}")
+        await event.answer("Perintah tidak dikenal!", alert=True)
+
+
+@bot.on(events.NewMessage)
+async def message_handler(event):
+    user_id = event.sender_id
+    message = event.message.text.strip()
+    
+    if user_id not in user_states:
+        return
+    
+    state = user_states[user_id]
+    
+    if message.lower() == '/cancel':
+        await cancel_command(event)
+        return
+    
+    if state == STATE_WAITING_USERNAME:
+        await process_username(event, user_id, message)
+    elif state == STATE_WAITING_STARS:
+        await process_stars(event, user_id, message)
+
+
+# ===================== PROSES PEMBELIAN =====================
+
+async def process_username(event, user_id: int, username: str):
+    clean_name = clean_username(username)
+    
+    if not clean_name:
+        await event.respond("❌ Username tidak valid")
+        return
+    
+    async with bot.action(event.chat_id, 'typing'):
+        await event.respond("🔍 **Mencari username...**")
+        
+        try:
+            user_info = await get_user(clean_name)
+            
+            if not user_info:
+                await event.respond(
+                    f"❌ Username **@{clean_name}** tidak ditemukan.",
+                    parse_mode='markdown'
+                )
                 return
             
-            # Proses pembelian
-            logger.info(f"Processing purchase: {state.amount} stars for @{state.username}")
+            user_data[user_id]['username'] = clean_name
+            user_data[user_id]['nickname'] = user_info['nickname']
+            user_data[user_id]['address'] = user_info['address']
             
-            result = await self.fragment_api.buy_stars(
-                username=state.username,
-                quantity=state.amount,
-                show_sender=True
+            user_states[user_id] = STATE_WAITING_STARS
+            
+            await event.respond(
+                f"✅ **User Ditemukan:** {user_info['nickname']}\n\n"
+                f"Masukkan **jumlah stars** (angka):\n"
+                f"Min: {MIN_STARS:,} - Max: {MAX_STARS:,}",
+                parse_mode='markdown'
             )
             
-            # Cek hasil dari API
-            if hasattr(result, 'success') and result.success:
-                # Update statistik
-                self.total_purchases += 1
-                self.total_stars += state.amount
-                
-                tx_hash = getattr(result, 'transaction_hash', 'N/A')
-                
-                success_msg = f"""
-✅ **PEMBELIAN BERHASIL!**
-
-**Penerima:** @{state.username}
-**Jumlah:** {state.amount} ⭐
-**Transaction Hash:** `{tx_hash}`
-
-✨ Stars akan segera masuk ke akun penerima.
-Terima kasih telah menggunakan bot ini!
-                """
-                
-                await event.edit(success_msg, parse_mode='markdown')
-                logger.info(f"Purchase successful: {state.amount} stars for @{state.username}")
-                
-            else:
-                error = getattr(result, 'error', 'Unknown error')
-                error_msg = f"""
-❌ **PEMBELIAN GAGAL**
-
-**Error:** {error}
-
-Kemungkinan penyebab:
-• Saldo TON tidak cukup
-• Wallet tidak terhubung dengan Fragment
-• Rate limit dari Fragment
-
-Ketik /buy untuk mencoba lagi.
-                """
-                
-                await event.edit(error_msg, parse_mode='markdown')
-                logger.error(f"Purchase failed: {error}")
-                
-        except FragmentAPIError as e:
-            logger.error(f"FragmentAPIError: {e}")
-            await event.edit(f"❌ **FRAGMENT API ERROR:** {str(e)}")
         except Exception as e:
-            logger.error(f"Purchase exception: {e}")
-            await event.edit(f"❌ **ERROR:** {str(e)[:200]}\n\nKetik /buy untuk coba lagi.")
-        
-        # Hapus state
-        if user_id in self.user_states:
-            del self.user_states[user_id]
-    
-    async def cleanup(self):
-        """Cleanup resources"""
-        logger.info("Shutting down bot...")
-        if self.fragment_api:
-            await self.fragment_api.close()
-        if self.client:
-            await self.client.disconnect()
+            logger.error(f"Error: {e}")
+            await event.respond("❌ Terjadi kesalahan.")
 
-# ==================== MAIN ====================
+
+async def process_stars(event, user_id: int, stars_str: str):
+    try:
+        stars = int(stars_str)
+        
+        if stars < MIN_STARS:
+            await event.respond(f"❌ Minimal {MIN_STARS:,} stars")
+            return
+        
+        if stars > MAX_STARS:
+            await event.respond(f"❌ Maksimal {MAX_STARS:,} stars")
+            return
+        
+        user_data[user_id]['stars'] = stars
+        user_data[user_id]['price'] = calculate_price(stars)
+        
+        # Tanyakan opsi show sender
+        await ask_sender_option(event, user_id)
+        
+    except ValueError:
+        await event.respond("❌ Masukkan angka yang valid.")
+
+
+async def ask_sender_option(event, user_id: int):
+    """Tanya user apakah ingin menampilkan nama pengirim atau tidak."""
+    
+    option_text = (
+        "👤 **Opsi Pengirim**\n\n"
+        "Pilih bagaimana nama pengirim ditampilkan:\n\n"
+        "✅ **Tampilkan nama saya** - Penerima akan melihat nama akun Fragment Anda sebagai pengirim\n"
+        "❌ **Sembunyikan nama** - Akan muncul sebagai hadiah dari Telegram (anonim)\n\n"
+        "Pilih opsi di bawah:"
+    )
+    
+    buttons = [
+        [
+            Button.inline("👤 Tampilkan Nama Saya", data=f"sender_show_{user_id}"),
+            Button.inline("🎁 Sembunyikan (Gift)", data=f"sender_hide_{user_id}")
+        ]
+    ]
+    
+    user_states[user_id] = STATE_WAITING_SENDER_OPTION
+    await event.respond(option_text, buttons=buttons, parse_mode='markdown')
+
+
+async def show_confirmation(event, user_id: int):
+    data = user_data[user_id]
+    
+    # Tentukan teks berdasarkan opsi sender
+    sender_text = "👤 Menampilkan nama saya" if data.get('show_sender', True) else "🎁 Sembunyikan (Gift mode)"
+    
+    confirm_text = (
+        "📝 **Konfirmasi Pembelian**\n\n"
+        f"**Penerima:** {data['nickname']}\n"
+        f"**Username:** @{data['username']}\n"
+        f"**Stars:** {format_number(data['stars'])}\n"
+        f"**Harga:** {data['price']:.2f} TON\n"
+        f"**Opsi Pengirim:** {sender_text}\n\n"
+        "⚠️ Transaksi tidak dapat dibatalkan!\n\n"
+        "Setuju?"
+    )
+    
+    buttons = [
+        [
+            Button.inline("✅ Ya", data=f"confirm_{user_id}"),
+            Button.inline("❌ Tidak", data=f"cancel_{user_id}")
+        ],
+        [Button.inline("🔙 Ubah Opsi Pengirim", data=f"sender_back_{user_id}")]
+    ]
+    
+    user_states[user_id] = STATE_CONFIRM_PURCHASE
+    await event.respond(confirm_text, buttons=buttons, parse_mode='markdown')
+
+
+async def confirm_purchase(event, user_id: int):
+    if user_id not in user_data:
+        await event.edit("❌ Sesi kadaluarsa.")
+        return
+    
+    purchase_data = user_data[user_id]
+    
+    # Pastikan show_sender memiliki nilai default True
+    show_sender = purchase_data.get('show_sender', True)
+    
+    await event.edit(
+        "⏳ **Memproses pembelian...**\n\n"
+        f"Penerima: @{purchase_data['username']}\n"
+        f"Stars: {format_number(purchase_data['stars'])}\n"
+        f"Opsi: {'Tampilkan nama' if show_sender else 'Sembunyikan (Gift)'}",
+        parse_mode='markdown'
+    )
+    
+    # Catat pembelian dengan status pending
+    await save_purchase(
+        user_id=user_id,
+        recipient_username=purchase_data['username'],
+        recipient_nickname=purchase_data['nickname'],
+        stars_amount=purchase_data['stars'],
+        price_ton=purchase_data['price'],
+        show_sender=show_sender,
+        status="pending"
+    )
+    
+    try:
+        tx_hash = await pay_stars_order(
+            username=purchase_data['username'],
+            quantity=purchase_data['stars'],
+            show_sender=show_sender
+        )
+        
+        if tx_hash:
+            # Update status menjadi success
+            await save_purchase(
+                user_id=user_id,
+                recipient_username=purchase_data['username'],
+                recipient_nickname=purchase_data['nickname'],
+                stars_amount=purchase_data['stars'],
+                price_ton=purchase_data['price'],
+                tx_hash=tx_hash,
+                show_sender=show_sender,
+                status="success"
+            )
+            
+            success_text = (
+                "✅ **Pembelian Berhasil!**\n\n"
+                f"**Penerima:** @{purchase_data['username']}\n"
+                f"**Stars:** {format_number(purchase_data['stars'])}\n"
+                f"**Harga:** {purchase_data['price']:.2f} TON\n"
+                f"**Opsi:** {'👤 Nama ditampilkan' if show_sender else '🎁 Gift mode (anonim)'}\n"
+                f"**Hash:** `{tx_hash}`\n\n"
+                f"[Lihat di TON Viewer](https://tonviewer.com/transaction/{tx_hash})"
+            )
+            
+            await event.edit(
+                success_text,
+                buttons=[Button.inline("🛒 Beli Lagi", data="buy")],
+                parse_mode='markdown',
+                link_preview=False
+            )
+            
+            await notify_admins(purchase_data, tx_hash, show_sender)
+            await log_activity(user_id, "purchase_success", f"Stars: {purchase_data['stars']}, Hash: {tx_hash}")
+        else:
+            # Update status menjadi failed
+            await save_purchase(
+                user_id=user_id,
+                recipient_username=purchase_data['username'],
+                recipient_nickname=purchase_data['nickname'],
+                stars_amount=purchase_data['stars'],
+                price_ton=purchase_data['price'],
+                show_sender=show_sender,
+                status="failed",
+                error_message="Transaction failed"
+            )
+            
+            await event.edit(
+                "❌ **Pembelian Gagal**\n\n"
+                "Coba lagi nanti.",
+                buttons=[Button.inline("🔄 Coba Lagi", data="buy")],
+                parse_mode='markdown'
+            )
+            await log_activity(user_id, "purchase_failed", f"Stars: {purchase_data['stars']}")
+    
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        
+        # Update status menjadi error
+        await save_purchase(
+            user_id=user_id,
+            recipient_username=purchase_data['username'],
+            recipient_nickname=purchase_data['nickname'],
+            stars_amount=purchase_data['stars'],
+            price_ton=purchase_data['price'],
+            show_sender=show_sender,
+            status="error",
+            error_message=str(e)[:200]
+        )
+        
+        await event.edit(
+            f"❌ **Error:** {str(e)[:100]}",
+            buttons=[Button.inline("🔄 Coba Lagi", data="buy")],
+            parse_mode='markdown'
+        )
+        await log_activity(user_id, "purchase_error", str(e)[:100])
+    finally:
+        # Hapus pending purchase
+        await delete_pending_purchase(user_id)
+        
+        if user_id in user_states:
+            del user_states[user_id]
+        if user_id in user_data:
+            del user_data[user_id]
+
+
+async def cancel_purchase(event, user_id: int):
+    if user_id in user_states:
+        del user_states[user_id]
+    if user_id in user_data:
+        del user_data[user_id]
+    
+    # Hapus pending purchase
+    await delete_pending_purchase(user_id)
+    
+    await event.edit(
+        "❌ **Pembelian Dibatalkan**",
+        buttons=[Button.inline("🛒 Beli Stars", data="buy")],
+        parse_mode='markdown'
+    )
+    await log_activity(user_id, "purchase_cancelled", "User cancelled purchase")
+
+
+async def notify_admins(purchase_data: dict, tx_hash: str, show_sender: bool):
+    notif = (
+        "💰 **Pembelian Baru**\n\n"
+        f"**User:** @{purchase_data['username']}\n"
+        f"**Stars:** {format_number(purchase_data['stars'])}\n"
+        f"**Harga:** {purchase_data['price']:.2f} TON\n"
+        f"**Opsi:** {'👤 Tampil' if show_sender else '🎁 Gift'}\n"
+        f"**Tx Hash:** `{tx_hash}`"
+    )
+    
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, notif, parse_mode='markdown')
+        except Exception as e:
+            logger.error(f"Gagal notifikasi admin {admin_id}: {e}")
+
+
+# ===================== MAIN =====================
 
 async def main():
-    """Main function"""
-    bot = StarsBot()
-    await bot.start()
+    logger.info("Memulai Main Bot...")
+    
+    # Inisialisasi database
+    init_database()
+    
+    if not API_ID or not API_HASH or not BOT_TOKEN:
+        logger.error("❌ Konfigurasi Telegram tidak lengkap")
+        return
+    
+    logger.info(f"📊 COOKIES length: {len(COOKIES)}")
+    logger.info(f"📊 HASH length: {len(HASH)}")
+    logger.info(f"📊 WALLET_MNEMONIC length: {len(WALLET_MNEMONIC)}")
+    
+    logger.info("✅ Starting main bot...")
+    await bot.start(bot_token=BOT_TOKEN)
+    logger.info("✅ Main bot running")
+    await bot.run_until_disconnected()
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n\n👋 Bot stopped by user")
+        logger.info("🛑 Bot dihentikan oleh user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+        logger.error(f"❌ Error fatal: {e}")
