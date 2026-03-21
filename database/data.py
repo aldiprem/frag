@@ -96,7 +96,6 @@ async def save_user(user_id: int, username: str = None, first_name: str = None, 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Cek apakah user sudah ada
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         existing = cursor.fetchone()
         
@@ -104,14 +103,12 @@ async def save_user(user_id: int, username: str = None, first_name: str = None, 
         is_admin = 1 if admin_ids and user_id in admin_ids else 0
         
         if existing:
-            # Update last_seen
             cursor.execute('''
                 UPDATE users 
                 SET username = ?, first_name = ?, last_name = ?, last_seen = ?, is_admin = ?
                 WHERE user_id = ?
             ''', (username, first_name, last_name, now, is_admin, user_id))
         else:
-            # Insert new user
             cursor.execute('''
                 INSERT INTO users (user_id, username, first_name, last_name, is_admin, first_seen, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -169,7 +166,6 @@ async def save_purchase(
         conn.commit()
         conn.close()
         
-        # Log aktivitas pembelian
         await log_activity(
             user_id, 
             "purchase", 
@@ -297,14 +293,12 @@ async def get_user_stats(user_id: int) -> Dict:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Total pembelian
         cursor.execute('''
             SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
             FROM purchases WHERE user_id = ? AND status = 'success'
         ''', (user_id,))
         total_purchases, total_stars, total_spent = cursor.fetchone()
         
-        # Pembelian hari ini
         today = datetime.now().date().isoformat()
         cursor.execute('''
             SELECT COUNT(*)
@@ -337,11 +331,9 @@ async def get_all_stats() -> Dict:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Total user
         cursor.execute('SELECT COUNT(*) FROM users')
         total_users = cursor.fetchone()[0]
         
-        # User aktif hari ini
         today = datetime.now().date().isoformat()
         cursor.execute('''
             SELECT COUNT(DISTINCT user_id) FROM activity_log 
@@ -349,14 +341,12 @@ async def get_all_stats() -> Dict:
         ''', (today,))
         active_today = cursor.fetchone()[0]
         
-        # Total pembelian
         cursor.execute('''
             SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
             FROM purchases WHERE status = 'success'
         ''')
         total_purchases, total_stars, total_volume = cursor.fetchone()
         
-        # Pembelian hari ini
         cursor.execute('''
             SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
             FROM purchases WHERE status = 'success' AND DATE(timestamp) = ?
