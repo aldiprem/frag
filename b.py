@@ -3,16 +3,27 @@ import os
 import json
 import asyncio
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime
 from telethon.extensions.markdown import DEFAULT_DELIMITERS
 from telethon.tl.types import MessageEntityBlockquote
-import aiohttp
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
 
-# Import fungsi dari database
+# Import dari folder api
+from api.fragment import (
+    encoded,
+    post,
+    get_user_address,
+    init_buy_stars,
+    get_buy_stars
+)
+
+from api.wallet import send_transfer, get_balance
+
+# Import dari folder database
 from database.data import (
     init_database,
     save_user,
@@ -27,17 +38,6 @@ from database.data import (
     get_all_stats,
     get_recent_purchases
 )
-
-# Import fungsi fragment dan wallet
-from fragment import (
-    encoded,
-    post,
-    get_user_address,
-    init_buy_stars,
-    get_buy_stars
-)
-
-from wallet import send_transfer, get_balance
 
 # ===================== LOAD ENVIRONMENT VARIABLES =====================
 env_path = Path('.') / '.env'
@@ -68,9 +68,6 @@ try:
 except Exception as e:
     print(f"❌ Failed to parse WALLET_MNEMONIC: {e}")
     WALLET_MNEMONIC = []
-
-# Database configuration
-DB_PATH = "frag.db"
 
 # Logging
 logging.basicConfig(
@@ -215,10 +212,8 @@ def clean_username(username: str) -> str:
 async def start_handler(event):
     user = await event.get_sender()
     user_id = event.sender_id
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
     
-    # Simpan user ke database dengan admin_ids
+    # Simpan user ke database
     await save_user(
         user_id=user_id,
         username=user.username,
@@ -329,16 +324,12 @@ async def stats_command(event):
     await log_activity(user_id, "stats", "User viewed their stats")
 
 
-# [LANJUTKAN HANDLER UNTUK CALLBACKQUERY DAN MESSAGE HANDLER YANG SAMA SEPERTI DI FILE ASLI]
-# Karena panjang, saya akan melanjutkan dengan bagian yang sudah dipisahkan database-nya
-
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
     user_id = event.sender_id
     data = event.data.decode('utf-8')
     
-    # ===================== HANDLER UNTUK OPSI SENDER =====================
-    
+    # Handler untuk memilih TAMPILKAN NAMA
     if data.startswith("sender_show_"):
         user_data[user_id]['show_sender'] = True
         await save_pending_purchase(
@@ -355,6 +346,7 @@ async def callback_handler(event):
         await log_activity(user_id, "sender_option", "User chose to show sender name")
         return
     
+    # Handler untuk memilih SEMBUNYIKAN NAMA
     elif data.startswith("sender_hide_"):
         user_data[user_id]['show_sender'] = False
         await save_pending_purchase(
@@ -371,6 +363,7 @@ async def callback_handler(event):
         await log_activity(user_id, "sender_option", "User chose to hide sender name")
         return
     
+    # Handler untuk kembali ke opsi sender
     elif data.startswith("sender_back_"):
         if user_id not in user_data:
             await event.answer("Sesi telah berakhir, silakan mulai lagi.", alert=True)
@@ -378,14 +371,17 @@ async def callback_handler(event):
         await ask_sender_option(event, user_id)
         return
     
+    # Handler untuk konfirmasi
     elif data.startswith("confirm_"):
         await confirm_purchase(event, user_id)
         return
     
+    # Handler untuk cancel
     elif data.startswith("cancel_"):
         await cancel_purchase(event, user_id)
         return
     
+    # Menu utama
     elif data == "buy":
         user_states[user_id] = STATE_WAITING_USERNAME
         user_data[user_id] = {}
@@ -465,7 +461,7 @@ async def callback_handler(event):
             [Button.inline("💰 Cek Saldo", data="balance")],
             [Button.inline("📊 Detail Statistik", data="admin_stats")],
             [Button.inline("🔄 Restart Bot", data="restart")],
-            [Button.inline("🔙 Kembali", data="start")]    
+            [Button.inline("🔙 Kembali", data="start")]
         ]
         await event.edit(admin_text, buttons=buttons, parse_mode='markdown')
         await log_activity(user_id, "admin", "Admin accessed admin panel")
@@ -479,8 +475,8 @@ async def callback_handler(event):
         
         stats_text = "📊 **10 Pembelian Terakhir**\n\n"
         for i, purchase in enumerate(recent_purchases, 1):
-            user_id, recipient, stars, price, status, ts = purchase
-            stats_text += f"{i}. User: {user_id}\n   → @{recipient}: {stars} stars ({price:.2f} TON)\n   Status: {status}\n   {ts[:19]}\n\n"
+            uid, recipient, stars, price, status, ts = purchase
+            stats_text += f"{i}. User: {uid}\n   → @{recipient}: {stars} stars ({price:.2f} TON)\n   Status: {status}\n   {ts[:19]}\n\n"
         
         await event.edit(
             stats_text,
@@ -522,6 +518,13 @@ async def callback_handler(event):
         user_states.clear()
         user_data.clear()
         
+        # Hapus semua pending purchases
+        conn = sqlite3.connect("frag.db")
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM pending_purchases')
+        conn.commit()
+        conn.close()
+        
         await event.edit(
             "✅ **Bot telah di-restart**\n\n"
             "Semua sesi pengguna telah dihapus.",
@@ -532,6 +535,10 @@ async def callback_handler(event):
     
     elif data == "start":
         await start_handler(event)
+    
+    else:
+        logger.warning(f"Unknown callback data: {data} from user {user_id}")
+        await event.answer("Perintah tidak dikenal!", alert=True)
 
 
 @bot.on(events.NewMessage)
@@ -682,6 +689,7 @@ async def confirm_purchase(event, user_id: int):
         parse_mode='markdown'
     )
     
+    # Catat pembelian dengan status pending
     await save_purchase(
         user_id=user_id,
         recipient_username=purchase_data['username'],
@@ -700,6 +708,7 @@ async def confirm_purchase(event, user_id: int):
         )
         
         if tx_hash:
+            # Update status menjadi success
             await save_purchase(
                 user_id=user_id,
                 recipient_username=purchase_data['username'],
@@ -731,6 +740,7 @@ async def confirm_purchase(event, user_id: int):
             await notify_admins(purchase_data, tx_hash, show_sender)
             await log_activity(user_id, "purchase_success", f"Stars: {purchase_data['stars']}, Hash: {tx_hash}")
         else:
+            # Update status menjadi failed
             await save_purchase(
                 user_id=user_id,
                 recipient_username=purchase_data['username'],
@@ -753,6 +763,7 @@ async def confirm_purchase(event, user_id: int):
     except Exception as e:
         logger.error(f"Error: {e}")
         
+        # Update status menjadi error
         await save_purchase(
             user_id=user_id,
             recipient_username=purchase_data['username'],
@@ -771,6 +782,7 @@ async def confirm_purchase(event, user_id: int):
         )
         await log_activity(user_id, "purchase_error", str(e)[:100])
     finally:
+        # Hapus pending purchase
         await delete_pending_purchase(user_id)
         
         if user_id in user_states:
@@ -785,6 +797,7 @@ async def cancel_purchase(event, user_id: int):
     if user_id in user_data:
         del user_data[user_id]
     
+    # Hapus pending purchase
     await delete_pending_purchase(user_id)
     
     await event.edit(
