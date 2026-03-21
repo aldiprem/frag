@@ -1,23 +1,43 @@
 # b.py - Fragment Stars Bot - VERSION ALL-IN-ONE WITH DATABASE
 import os
 import json
-import base64
 import asyncio
 import logging
-import sqlite3
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime
-
+from telethon.extensions.markdown import DEFAULT_DELIMITERS
+from telethon.tl.types import MessageEntityBlockquote
 import aiohttp
-from aiohttp import ClientResponse, ClientConnectorError
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
 
-# Import tonutils
-from tonutils.client import TonapiClient
-from tonutils.utils import to_amount
-from tonutils.wallet import WalletV5R1
+# Import fungsi dari database
+from database.data import (
+    init_database,
+    save_user,
+    log_activity,
+    save_purchase,
+    save_pending_purchase,
+    get_pending_purchase,
+    delete_pending_purchase,
+    update_bot_config,
+    get_bot_config,
+    get_user_stats,
+    get_all_stats,
+    get_recent_purchases
+)
+
+# Import fungsi fragment dan wallet
+from fragment import (
+    encoded,
+    post,
+    get_user_address,
+    init_buy_stars,
+    get_buy_stars
+)
+
+from wallet import send_transfer, get_balance
 
 # ===================== LOAD ENVIRONMENT VARIABLES =====================
 env_path = Path('.') / '.env'
@@ -35,7 +55,7 @@ ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]
 PRICE_PER_STAR = float(os.getenv("PRICE_PER_STAR", 0.01))
 MIN_STARS = int(os.getenv("MIN_STARS", 10))
 MAX_STARS = int(os.getenv("MAX_STARS", 100000))
-
+DEFAULT_DELIMITERS['^^'] = lambda *a, **k: MessageEntityBlockquote(*a, **k, collapsed=True)
 COOKIES = os.getenv("COOKIES", "")
 HASH = os.getenv("HASH", "")
 
@@ -59,523 +79,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===================== DATABASE FUNCTIONS =====================
-
-def init_database():
-    """Inisialisasi database SQLite3."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # Tabel untuk menyimpan data pengguna
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            is_admin BOOLEAN DEFAULT 0,
-            first_seen TIMESTAMP,
-            last_seen TIMESTAMP
-        )
-    ''')
-    
-    # Tabel untuk menyimpan riwayat pembelian
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS purchases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            recipient_username TEXT,
-            recipient_nickname TEXT,
-            stars_amount INTEGER,
-            price_ton REAL,
-            tx_hash TEXT,
-            show_sender BOOLEAN,
-            status TEXT,
-            error_message TEXT,
-            timestamp TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-    ''')
-    
-    # Tabel untuk menyimpan log aktivitas
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS activity_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            action TEXT,
-            details TEXT,
-            ip_address TEXT,
-            timestamp TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-    ''')
-    
-    # Tabel untuk menyimpan konfigurasi bot
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bot_config (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at TIMESTAMP
-        )
-    ''')
-    
-    # Tabel untuk menyimpan sesi pembelian yang belum selesai
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pending_purchases (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            nickname TEXT,
-            address TEXT,
-            stars INTEGER,
-            price REAL,
-            show_sender BOOLEAN DEFAULT 1,
-            state TEXT,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-    logger.info("✅ Database initialized successfully")
-
-
-async def save_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None):
-    """Simpan atau update data pengguna."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Cek apakah user sudah ada
-        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        existing = cursor.fetchone()
-        
-        now = datetime.now().isoformat()
-        is_admin = 1 if user_id in ADMIN_IDS else 0
-        
-        if existing:
-            # Update last_seen
-            cursor.execute('''
-                UPDATE users 
-                SET username = ?, first_name = ?, last_name = ?, last_seen = ?, is_admin = ?
-                WHERE user_id = ?
-            ''', (username, first_name, last_name, now, is_admin, user_id))
-        else:
-            # Insert new user
-            cursor.execute('''
-                INSERT INTO users (user_id, username, first_name, last_name, is_admin, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, username, first_name, last_name, is_admin, now, now))
-        
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error saving user to database: {e}")
-
-
-async def log_activity(user_id: int, action: str, details: str = None, ip: str = None):
-    """Catat aktivitas pengguna."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO activity_log (user_id, action, details, ip_address, timestamp)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, action, details, ip, datetime.now().isoformat()))
-        
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error logging activity: {e}")
-
-
-async def save_purchase(
-    user_id: int, 
-    recipient_username: str, 
-    recipient_nickname: str, 
-    stars_amount: int, 
-    price_ton: float,
-    tx_hash: str = None,
-    show_sender: bool = True,
-    status: str = "pending",
-    error_message: str = None
-):
-    """Simpan riwayat pembelian."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO purchases 
-            (user_id, recipient_username, recipient_nickname, stars_amount, price_ton, 
-             tx_hash, show_sender, status, error_message, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            user_id, recipient_username, recipient_nickname, stars_amount, price_ton,
-            tx_hash, show_sender, status, error_message, datetime.now().isoformat()
-        ))
-        
-        conn.commit()
-        conn.close()
-        
-        # Log aktivitas pembelian
-        await log_activity(
-            user_id, 
-            "purchase", 
-            f"Stars: {stars_amount}, Recipient: @{recipient_username}, Status: {status}"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error saving purchase: {e}")
-
-
-async def save_pending_purchase(
-    user_id: int,
-    username: str,
-    nickname: str,
-    address: str,
-    stars: int,
-    price: float,
-    show_sender: bool = True,
-    state: str = None
-):
-    """Simpan sesi pembelian yang belum selesai."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        now = datetime.now().isoformat()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO pending_purchases 
-            (user_id, username, nickname, address, stars, price, show_sender, state, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(
-                (SELECT created_at FROM pending_purchases WHERE user_id = ?), ?
-            ), ?)
-        ''', (
-            user_id, username, nickname, address, stars, price, show_sender, state,
-            user_id, now, now
-        ))
-        
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error saving pending purchase: {e}")
-
-
-async def get_pending_purchase(user_id: int) -> Optional[Dict]:
-    """Ambil sesi pembelian yang belum selesai."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT username, nickname, address, stars, price, show_sender, state
-            FROM pending_purchases WHERE user_id = ?
-        ''', (user_id,))
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return {
-                'username': row[0],
-                'nickname': row[1],
-                'address': row[2],
-                'stars': row[3],
-                'price': row[4],
-                'show_sender': bool(row[5]),
-                'state': row[6]
-            }
-        return None
-    except Exception as e:
-        logger.error(f"Error getting pending purchase: {e}")
-        return None
-
-
-async def delete_pending_purchase(user_id: int):
-    """Hapus sesi pembelian yang sudah selesai/dibatalkan."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM pending_purchases WHERE user_id = ?', (user_id,))
-        
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error deleting pending purchase: {e}")
-
-
-async def update_bot_config(key: str, value: str):
-    """Update konfigurasi bot."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO bot_config (key, value, updated_at)
-            VALUES (?, ?, ?)
-        ''', (key, value, datetime.now().isoformat()))
-        
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error updating bot config: {e}")
-
-
-async def get_bot_config(key: str) -> Optional[str]:
-    """Ambil konfigurasi bot."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT value FROM bot_config WHERE key = ?', (key,))
-        row = cursor.fetchone()
-        
-        conn.close()
-        return row[0] if row else None
-    except Exception as e:
-        logger.error(f"Error getting bot config: {e}")
-        return None
-
-
-async def get_user_stats(user_id: int) -> Dict:
-    """Dapatkan statistik pengguna."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Total pembelian
-        cursor.execute('''
-            SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
-            FROM purchases WHERE user_id = ? AND status = 'success'
-        ''', (user_id,))
-        total_purchases, total_stars, total_spent = cursor.fetchone()
-        
-        # Pembelian hari ini
-        today = datetime.now().date().isoformat()
-        cursor.execute('''
-            SELECT COUNT(*)
-            FROM purchases 
-            WHERE user_id = ? AND status = 'success' AND DATE(timestamp) = ?
-        ''', (user_id, today))
-        today_purchases = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        return {
-            'total_purchases': total_purchases or 0,
-            'total_stars': total_stars or 0,
-            'total_spent': total_spent or 0,
-            'today_purchases': today_purchases or 0
-        }
-    except Exception as e:
-        logger.error(f"Error getting user stats: {e}")
-        return {
-            'total_purchases': 0,
-            'total_stars': 0,
-            'total_spent': 0,
-            'today_purchases': 0
-        }
-
-
-async def get_all_stats() -> Dict:
-    """Dapatkan statistik keseluruhan bot."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Total user
-        cursor.execute('SELECT COUNT(*) FROM users')
-        total_users = cursor.fetchone()[0]
-        
-        # User aktif hari ini
-        today = datetime.now().date().isoformat()
-        cursor.execute('''
-            SELECT COUNT(DISTINCT user_id) FROM activity_log 
-            WHERE DATE(timestamp) = ? AND action != 'system'
-        ''', (today,))
-        active_today = cursor.fetchone()[0]
-        
-        # Total pembelian
-        cursor.execute('''
-            SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
-            FROM purchases WHERE status = 'success'
-        ''')
-        total_purchases, total_stars, total_volume = cursor.fetchone()
-        
-        # Pembelian hari ini
-        cursor.execute('''
-            SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
-            FROM purchases WHERE status = 'success' AND DATE(timestamp) = ?
-        ''', (today,))
-        today_purchases, today_stars, today_volume = cursor.fetchone()
-        
-        conn.close()
-        
-        return {
-            'total_users': total_users or 0,
-            'active_today': active_today or 0,
-            'total_purchases': total_purchases or 0,
-            'total_stars': total_stars or 0,
-            'total_volume': total_volume or 0,
-            'today_purchases': today_purchases or 0,
-            'today_stars': today_stars or 0,
-            'today_volume': today_volume or 0
-        }
-    except Exception as e:
-        logger.error(f"Error getting all stats: {e}")
-        return {}
-
-
-# ===================== FRAGMENT API FUNCTIONS =====================
-
-async def encoded(encoded_string: str) -> str:
-    """Decode base64 string."""
-    if not encoded_string:
-        return ""
-    
-    missing_padding = len(encoded_string) % 4
-    if missing_padding != 0:
-        encoded_string += "=" * (4 - missing_padding)
-
-    try:
-        decoded_bytes = base64.b64decode(encoded_string)
-        decoded_string = decoded_bytes.decode("utf-8", errors="ignore")
-        return decoded_string
-    except Exception as e:
-        logger.error(f"Error decoding: {e}")
-        return encoded_string
-
-
-async def post(cookies: str, _hash: str, data: dict) -> Optional[dict]:
-    """POST request ke Fragment API."""
-    params = {"hash": _hash}
-    
-    if not cookies or not isinstance(cookies, str):
-        logger.error("Invalid cookies format")
-        return None
-
-    headers = {
-        "accept": "application/json, text/javascript, */*; q=0.01",
-        "accept-language": "en-US,en;q=0.9",
-        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "origin": "https://fragment.com",
-        "referer": "https://fragment.com/",
-        "cookie": cookies.strip(),
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "x-requested-with": "XMLHttpRequest",
-    }
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                "https://fragment.com/api", 
-                params=params, 
-                headers=headers, 
-                data=data
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    text = await response.text()
-                    logger.error(f"HTTP {response.status}: {text[:200]}")
-                    return None
-                        
-    except Exception as e:
-        logger.error(f"Connection error: {e}")
-        return None
-
-
-async def get_user_address(username: str) -> Optional[dict]:
-    """Cari user di Fragment."""
-    try:
-        data = {
-            "query": username,
-            "quantity": "",
-            "method": "searchStarsRecipient",
-        }
-        return await post(COOKIES, HASH, data)
-    except Exception as e:
-        logger.error(f"Error in get_user_address: {e}")
-        return None
-
-
-async def init_buy_stars(recipient: str, quantity: int) -> Optional[dict]:
-    """Inisialisasi pembelian stars."""
-    try:
-        data = {
-            "recipient": recipient,
-            "quantity": quantity,
-            "method": "initBuyStarsRequest",
-        }
-        return await post(COOKIES, HASH, data)
-    except Exception as e:
-        logger.error(f"Error in init_buy_stars: {e}")
-        return None
-
-
-async def get_buy_stars(req_id: str, show_sender: str = "1") -> Optional[dict]:
-    """Dapatkan detail pembayaran dengan opsi show_sender."""
-    try:
-        data = {
-            "transaction": "1",
-            "id": req_id,
-            "show_sender": show_sender,
-            "method": "getBuyStarsLink",
-        }
-        return await post(COOKIES, HASH, data)
-    except Exception as e:
-        logger.error(f"Error in get_buy_stars: {e}")
-        return None
-
-
-# ===================== WALLET FUNCTIONS =====================
-
-async def send_transfer(address: str, amount: int, payload: str) -> Optional[str]:
-    """Kirim transfer TON."""
-    try:
-        client = TonapiClient(api_key=WALLET_API_KEY, is_testnet=False)
-        wallet, _, _, _ = WalletV5R1.from_mnemonic(client, WALLET_MNEMONIC)
-
-        # Convert amount from nano TON to TON
-        amount_in_ton = amount / 1_000_000_000
-        logger.info(f"Sending {amount_in_ton} TON to {address}")
-        
-        tx_hash = await wallet.transfer(
-            destination=address,
-            amount=amount_in_ton,
-            body=payload,
-        )
-        return tx_hash
-    except Exception as e:
-        logger.error(f"Error in send_transfer: {e}")
-        return None
-
-
-async def get_balance() -> float:
-    """Dapatkan saldo wallet."""
-    try:
-        client = TonapiClient(api_key=WALLET_API_KEY, is_testnet=False)
-        wallet, _, _, _ = WalletV5R1.from_mnemonic(client, WALLET_MNEMONIC)
-        balance = await wallet.balance()
-        return float(balance)
-    except Exception as e:
-        logger.error(f"Error in get_balance: {e}")
-        return 0.0
-
-
 # ===================== WRAPPER FUNCTIONS =====================
 
 async def get_user(username: str) -> Optional[dict]:
     """Dapatkan informasi user dari Fragment."""
     try:
         logger.info(f"Searching for user: {username}")
-        user = await get_user_address(username)
+        user = await get_user_address(COOKIES, HASH, username)
         
         if user and user.get("found"):
             nickname = user.get("found").get("name")
@@ -595,7 +105,7 @@ async def pay_stars_order(username: str, quantity: int, show_sender: bool = True
         logger.info(f"Starting payment for @{username} - {quantity} stars (show_sender={show_sender})")
         
         # 1. Cari user
-        user = await get_user_address(username)
+        user = await get_user_address(COOKIES, HASH, username)
         if not user or not user.get("found"):
             logger.error("User not found")
             return None
@@ -606,7 +116,7 @@ async def pay_stars_order(username: str, quantity: int, show_sender: bool = True
             return None
 
         # 2. Init buy
-        init = await init_buy_stars(address, quantity)
+        init = await init_buy_stars(COOKIES, HASH, address, quantity)
         if not init:
             logger.error("Failed to init buy")
             return None
@@ -619,7 +129,7 @@ async def pay_stars_order(username: str, quantity: int, show_sender: bool = True
         # 3. Get buy details dengan parameter show_sender
         show_sender_value = "1" if show_sender else "0"
         
-        buy = await get_buy_stars(req_id, show_sender_value)
+        buy = await get_buy_stars(COOKIES, HASH, req_id, show_sender_value)
         if not buy:
             logger.error("Failed to get buy details")
             return None
@@ -642,7 +152,13 @@ async def pay_stars_order(username: str, quantity: int, show_sender: bool = True
         decoded_payload = await encoded(payload)
 
         # 6. Send transfer
-        tx_hash = await send_transfer(pay_address, int(amount), decoded_payload)
+        tx_hash = await send_transfer(
+            api_key=WALLET_API_KEY,
+            mnemonic=WALLET_MNEMONIC,
+            address=pay_address,
+            amount=int(amount),
+            payload=decoded_payload
+        )
 
         if tx_hash:
             logger.info(f"Transaction successful: {tx_hash}")
@@ -699,13 +215,16 @@ def clean_username(username: str) -> str:
 async def start_handler(event):
     user = await event.get_sender()
     user_id = event.sender_id
+    first_name = user.first_name or ""
+    last_name = user.last_name or ""
     
-    # Simpan user ke database
+    # Simpan user ke database dengan admin_ids
     await save_user(
         user_id=user_id,
         username=user.username,
         first_name=user.first_name,
-        last_name=user.last_name
+        last_name=user.last_name,
+        admin_ids=ADMIN_IDS
     )
     
     # Log aktivitas
@@ -715,7 +234,7 @@ async def start_handler(event):
     
     # Ambil statistik user
     user_stats = await get_user_stats(user_id)
-    
+
     welcome_text = (
         f"🌟 **Selamat Datang di Fragment Stars Bot** 🌟\n\n"
         f"Halo {user.first_name}!\n\n"
@@ -810,6 +329,9 @@ async def stats_command(event):
     await log_activity(user_id, "stats", "User viewed their stats")
 
 
+# [LANJUTKAN HANDLER UNTUK CALLBACKQUERY DAN MESSAGE HANDLER YANG SAMA SEPERTI DI FILE ASLI]
+# Karena panjang, saya akan melanjutkan dengan bagian yang sudah dipisahkan database-nya
+
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
     user_id = event.sender_id
@@ -817,10 +339,8 @@ async def callback_handler(event):
     
     # ===================== HANDLER UNTUK OPSI SENDER =====================
     
-    # Handler untuk memilih TAMPILKAN NAMA (show_sender = True)
     if data.startswith("sender_show_"):
         user_data[user_id]['show_sender'] = True
-        # Simpan ke pending purchase
         await save_pending_purchase(
             user_id=user_id,
             username=user_data[user_id]['username'],
@@ -835,10 +355,8 @@ async def callback_handler(event):
         await log_activity(user_id, "sender_option", "User chose to show sender name")
         return
     
-    # Handler untuk memilih SEMBUNYIKAN NAMA (show_sender = False)
     elif data.startswith("sender_hide_"):
         user_data[user_id]['show_sender'] = False
-        # Simpan ke pending purchase
         await save_pending_purchase(
             user_id=user_id,
             username=user_data[user_id]['username'],
@@ -853,17 +371,12 @@ async def callback_handler(event):
         await log_activity(user_id, "sender_option", "User chose to hide sender name")
         return
     
-    # Handler untuk kembali ke opsi sender dari halaman konfirmasi
     elif data.startswith("sender_back_"):
         if user_id not in user_data:
             await event.answer("Sesi telah berakhir, silakan mulai lagi.", alert=True)
             return
-        
-        # Kembali ke halaman pilihan sender
         await ask_sender_option(event, user_id)
         return
-    
-    # ===================== HANDLER UNTUK KONFIRMASI/CANCEL =====================
     
     elif data.startswith("confirm_"):
         await confirm_purchase(event, user_id)
@@ -873,10 +386,7 @@ async def callback_handler(event):
         await cancel_purchase(event, user_id)
         return
     
-    # ===================== HANDLER UNTUK MENU UTAMA =====================
-    
     elif data == "buy":
-        # Reset state untuk pembelian baru
         user_states[user_id] = STATE_WAITING_USERNAME
         user_data[user_id] = {}
         await delete_pending_purchase(user_id)
@@ -933,7 +443,6 @@ async def callback_handler(event):
             await event.answer("Akses ditolak!", alert=True)
             return
         
-        # Ambil statistik keseluruhan
         stats = await get_all_stats()
         
         admin_text = (
@@ -956,7 +465,7 @@ async def callback_handler(event):
             [Button.inline("💰 Cek Saldo", data="balance")],
             [Button.inline("📊 Detail Statistik", data="admin_stats")],
             [Button.inline("🔄 Restart Bot", data="restart")],
-            [Button.inline("🔙 Kembali", data="start")]
+            [Button.inline("🔙 Kembali", data="start")]    
         ]
         await event.edit(admin_text, buttons=buttons, parse_mode='markdown')
         await log_activity(user_id, "admin", "Admin accessed admin panel")
@@ -966,16 +475,7 @@ async def callback_handler(event):
             await event.answer("Akses ditolak!", alert=True)
             return
         
-        # Ambil 10 pembelian terakhir
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT user_id, recipient_username, stars_amount, price_ton, status, timestamp
-            FROM purchases
-            ORDER BY timestamp DESC LIMIT 10
-        ''')
-        recent_purchases = cursor.fetchall()
-        conn.close()
+        recent_purchases = await get_recent_purchases(10)
         
         stats_text = "📊 **10 Pembelian Terakhir**\n\n"
         for i, purchase in enumerate(recent_purchases, 1):
@@ -995,7 +495,7 @@ async def callback_handler(event):
         
         try:
             await event.edit("⏳ **Mengambil saldo...**")
-            balance = await get_balance()
+            balance = await get_balance(WALLET_API_KEY, WALLET_MNEMONIC)
             await event.edit(
                 f"💰 **Saldo Wallet**\n\n"
                 f"Saldo: `{balance:.2f}` TON\n\n"
@@ -1019,16 +519,8 @@ async def callback_handler(event):
             await event.answer("Akses ditolak!", alert=True)
             return
         
-        # Reset semua state
         user_states.clear()
         user_data.clear()
-        
-        # Hapus semua pending purchases
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM pending_purchases')
-        conn.commit()
-        conn.close()
         
         await event.edit(
             "✅ **Bot telah di-restart**\n\n"
@@ -1040,12 +532,6 @@ async def callback_handler(event):
     
     elif data == "start":
         await start_handler(event)
-    
-    # ===================== HANDLER UNTUK DATA TIDAK DIKENAL =====================
-    
-    else:
-        logger.warning(f"Unknown callback data: {data} from user {user_id}")
-        await event.answer("Perintah tidak dikenal!", alert=True)
 
 
 @bot.on(events.NewMessage)
@@ -1123,7 +609,6 @@ async def process_stars(event, user_id: int, stars_str: str):
         user_data[user_id]['stars'] = stars
         user_data[user_id]['price'] = calculate_price(stars)
         
-        # Tanyakan opsi show sender
         await ask_sender_option(event, user_id)
         
     except ValueError:
@@ -1155,7 +640,6 @@ async def ask_sender_option(event, user_id: int):
 async def show_confirmation(event, user_id: int):
     data = user_data[user_id]
     
-    # Tentukan teks berdasarkan opsi sender
     sender_text = "👤 Menampilkan nama saya" if data.get('show_sender', True) else "🎁 Sembunyikan (Gift mode)"
     
     confirm_text = (
@@ -1188,7 +672,6 @@ async def confirm_purchase(event, user_id: int):
     
     purchase_data = user_data[user_id]
     
-    # Pastikan show_sender memiliki nilai default True
     show_sender = purchase_data.get('show_sender', True)
     
     await event.edit(
@@ -1199,7 +682,6 @@ async def confirm_purchase(event, user_id: int):
         parse_mode='markdown'
     )
     
-    # Catat pembelian dengan status pending
     await save_purchase(
         user_id=user_id,
         recipient_username=purchase_data['username'],
@@ -1218,7 +700,6 @@ async def confirm_purchase(event, user_id: int):
         )
         
         if tx_hash:
-            # Update status menjadi success
             await save_purchase(
                 user_id=user_id,
                 recipient_username=purchase_data['username'],
@@ -1250,7 +731,6 @@ async def confirm_purchase(event, user_id: int):
             await notify_admins(purchase_data, tx_hash, show_sender)
             await log_activity(user_id, "purchase_success", f"Stars: {purchase_data['stars']}, Hash: {tx_hash}")
         else:
-            # Update status menjadi failed
             await save_purchase(
                 user_id=user_id,
                 recipient_username=purchase_data['username'],
@@ -1273,7 +753,6 @@ async def confirm_purchase(event, user_id: int):
     except Exception as e:
         logger.error(f"Error: {e}")
         
-        # Update status menjadi error
         await save_purchase(
             user_id=user_id,
             recipient_username=purchase_data['username'],
@@ -1292,7 +771,6 @@ async def confirm_purchase(event, user_id: int):
         )
         await log_activity(user_id, "purchase_error", str(e)[:100])
     finally:
-        # Hapus pending purchase
         await delete_pending_purchase(user_id)
         
         if user_id in user_states:
@@ -1307,7 +785,6 @@ async def cancel_purchase(event, user_id: int):
     if user_id in user_data:
         del user_data[user_id]
     
-    # Hapus pending purchase
     await delete_pending_purchase(user_id)
     
     await event.edit(
