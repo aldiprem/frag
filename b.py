@@ -223,7 +223,7 @@ async def get_user_stats(user_id: int) -> Dict:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
-                       FROM purchases WHERE user_id = ? AND status = 'success'''', (user_id,))
+                       FROM purchases WHERE user_id = ? AND status = 'success' ''', (user_id,))
         total_purchases, total_stars, total_spent = cursor.fetchone()
         today = datetime.now().date().isoformat()
         cursor.execute('''SELECT COUNT(*) FROM purchases WHERE user_id = ? AND status = 'success' AND DATE(timestamp) = ?''',
@@ -244,7 +244,7 @@ async def get_all_stats() -> Dict:
         cursor.execute('SELECT COUNT(*) FROM users')
         total_users = cursor.fetchone()[0]
         today = datetime.now().date().isoformat()
-        cursor.execute('''SELECT COUNT(DISTINCT user_id) FROM activity_log WHERE DATE(timestamp) = ? AND action != 'system'''', (today,))
+        cursor.execute('''SELECT COUNT(DISTINCT user_id) FROM activity_log WHERE DATE(timestamp) = ? AND action != 'system' ''', (today,))
         active_today = cursor.fetchone()[0]
         cursor.execute('''SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_ton), 0)
                        FROM purchases WHERE status = 'success' ''')
@@ -622,7 +622,7 @@ async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
-async def check_config() -> tuple[bool, bool]:
+async def check_config() -> tuple:
     return bool(COOKIES and HASH), bool(WALLET_API_KEY and WALLET_MNEMONIC)
 
 
@@ -1032,6 +1032,18 @@ async def callback_handler(event):
         await admin_panel(event)
     elif data == "start":
         await start_handler(event)
+    elif data.startswith("sender_show_"):
+        user_data[user_id]['show_sender'] = True
+        await show_confirmation(event, user_id)
+    elif data.startswith("sender_hide_"):
+        user_data[user_id]['show_sender'] = False
+        await show_confirmation(event, user_id)
+    elif data.startswith("confirm_"):
+        await confirm_purchase(event, user_id)
+    elif data.startswith("cancel_"):
+        await cancel_purchase(event, user_id)
+    elif data.startswith("sender_back_"):
+        await ask_sender_option(event, user_id)
 
 
 # ===================== MESSAGE HANDLER =====================
@@ -1127,25 +1139,6 @@ async def ask_sender_option(event, user_id: int):
     
     user_states[user_id] = STATE_WAITING_SENDER_OPTION
     await event.respond(option_text, buttons=buttons, parse_mode='markdown')
-
-
-@bot.on(events.CallbackQuery)
-async def sender_callback(event):
-    user_id = event.sender_id
-    data = event.data.decode('utf-8')
-    
-    if data.startswith("sender_show_"):
-        user_data[user_id]['show_sender'] = True
-        await show_confirmation(event, user_id)
-    elif data.startswith("sender_hide_"):
-        user_data[user_id]['show_sender'] = False
-        await show_confirmation(event, user_id)
-    elif data.startswith("confirm_"):
-        await confirm_purchase(event, user_id)
-    elif data.startswith("cancel_"):
-        await cancel_purchase(event, user_id)
-    elif data.startswith("sender_back_"):
-        await ask_sender_option(event, user_id)
 
 
 async def show_confirmation(event, user_id: int):
@@ -1289,3 +1282,4 @@ if __name__ == '__main__':
         asyncio.run(stop_all_cloned_bots())
     except Exception as e:
         logger.error(f"❌ Error fatal: {e}")
+        
