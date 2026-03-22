@@ -1,43 +1,27 @@
-# b.py - Fragment Stars Bot - VERSION ALL-IN-ONE WITH DATABASE
+# b.py - Fragment Stars Bot Master with Clone System
 import os
 import json
+import base64
 import asyncio
 import logging
 import sqlite3
+import subprocess
+import sys
+import signal
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 from telethon.extensions.markdown import DEFAULT_DELIMITERS
 from telethon.tl.types import MessageEntityBlockquote
+import aiohttp
+from aiohttp import ClientResponse, ClientConnectorError
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
 
-# Import dari folder api
-from api.fragment import (
-    encoded,
-    post,
-    get_user_address,
-    init_buy_stars,
-    get_buy_stars
-)
-
-from api.wallet import send_transfer, get_balance
-
-# Import dari folder database
-from database.data import (
-    init_database,
-    save_user,
-    log_activity,
-    save_purchase,
-    save_pending_purchase,
-    get_pending_purchase,
-    delete_pending_purchase,
-    update_bot_config,
-    get_bot_config,
-    get_user_stats,
-    get_all_stats,
-    get_recent_purchases
-)
+# Import tonutils
+from tonutils.client import TonapiClient
+from tonutils.utils import to_amount
+from tonutils.wallet import WalletV5R1
 
 # ===================== LOAD ENVIRONMENT VARIABLES =====================
 env_path = Path('.') / '.env'
@@ -69,6 +53,9 @@ except Exception as e:
     print(f"❌ Failed to parse WALLET_MNEMONIC: {e}")
     WALLET_MNEMONIC = []
 
+# Database configuration
+DB_PATH = "frag.db"
+
 # Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -76,775 +63,765 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===================== WRAPPER FUNCTIONS =====================
+# Store running bot processes
+running_bots: Dict[str, subprocess.Popen] = {}
 
-async def get_user(username: str) -> Optional[dict]:
-    """Dapatkan informasi user dari Fragment."""
-    try:
-        logger.info(f"Searching for user: {username}")
-        user = await get_user_address(COOKIES, HASH, username)
-        
-        if user and user.get("found"):
-            nickname = user.get("found").get("name")
-            address = user.get("found").get("recipient")
-            if nickname and address:
-                logger.info(f"Found user: {nickname}")
-                return {"nickname": nickname, "address": address}
-        return None
-    except Exception as e:
-        logger.error(f"Error in get_user: {e}")
-        return None
+# ===================== DATABASE FUNCTIONS (EXTENDED) =====================
 
-
-async def pay_stars_order(username: str, quantity: int, show_sender: bool = True) -> Optional[str]:
-    """Proses pembayaran stars dengan opsi menampilkan/menyembunyikan pengirim."""
-    try:
-        logger.info(f"Starting payment for @{username} - {quantity} stars (show_sender={show_sender})")
-        
-        # 1. Cari user
-        user = await get_user_address(COOKIES, HASH, username)
-        if not user or not user.get("found"):
-            logger.error("User not found")
-            return None
-            
-        address = user.get("found").get("recipient")
-        if not address:
-            logger.error("Invalid user address")
-            return None
-
-        # 2. Init buy
-        init = await init_buy_stars(COOKIES, HASH, address, quantity)
-        if not init:
-            logger.error("Failed to init buy")
-            return None
-            
-        req_id = init.get("req_id")
-        if not req_id:
-            logger.error("No req_id in response")
-            return None
-
-        # 3. Get buy details dengan parameter show_sender
-        show_sender_value = "1" if show_sender else "0"
-        
-        buy = await get_buy_stars(COOKIES, HASH, req_id, show_sender_value)
-        if not buy:
-            logger.error("Failed to get buy details")
-            return None
-            
-        # 4. Parse transaction data
-        messages = buy.get("transaction", {}).get("messages", [])
-        if not messages:
-            logger.error("No messages in transaction")
-            return None
-            
-        pay_address = messages[0].get("address")
-        amount = messages[0].get("amount")
-        payload = messages[0].get("payload")
-
-        if not all([pay_address, amount, payload]):
-            logger.error("Missing transaction data")
-            return None
-
-        # 5. Decode payload
-        decoded_payload = await encoded(payload)
-
-        # 6. Send transfer
-        tx_hash = await send_transfer(
-            api_key=WALLET_API_KEY,
-            mnemonic=WALLET_MNEMONIC,
-            address=pay_address,
-            amount=int(amount),
-            payload=decoded_payload
+def init_database():
+    """Inisialisasi database SQLite3 dengan tabel untuk bot clone."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Tabel untuk menyimpan data pengguna
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            is_admin BOOLEAN DEFAULT 0,
+            first_seen TIMESTAMP,
+            last_seen TIMESTAMP
         )
+    ''')
+    
+    # Tabel untuk menyimpan riwayat pembelian
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            recipient_username TEXT,
+            recipient_nickname TEXT,
+            stars_amount INTEGER,
+            price_ton REAL,
+            tx_hash TEXT,
+            show_sender BOOLEAN,
+            status TEXT,
+            error_message TEXT,
+            timestamp TIMESTAMP,
+            bot_token TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    ''')
+    
+    # Tabel untuk menyimpan log aktivitas
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT,
+            details TEXT,
+            ip_address TEXT,
+            timestamp TIMESTAMP,
+            bot_token TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    ''')
+    
+    # Tabel untuk menyimpan konfigurasi bot
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_config (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP
+        )
+    ''')
+    
+    # Tabel untuk menyimpan sesi pembelian yang belum selesai
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pending_purchases (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            nickname TEXT,
+            address TEXT,
+            stars INTEGER,
+            price REAL,
+            show_sender BOOLEAN DEFAULT 1,
+            state TEXT,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            bot_token TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    ''')
+    
+    # ========== TABEL BARU UNTUK BOT CLONE ==========
+    
+    # Tabel untuk menyimpan bot clone
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cloned_bots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_token TEXT UNIQUE NOT NULL,
+            bot_username TEXT,
+            bot_name TEXT,
+            status TEXT DEFAULT 'stopped',
+            created_by INTEGER,
+            created_at TIMESTAMP,
+            last_started TIMESTAMP,
+            last_stopped TIMESTAMP,
+            pid INTEGER,
+            FOREIGN KEY (created_by) REFERENCES users (user_id)
+        )
+    ''')
+    
+    # Tabel untuk menyimpan log bot clone
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_token TEXT,
+            log_level TEXT,
+            message TEXT,
+            timestamp TIMESTAMP,
+            FOREIGN KEY (bot_token) REFERENCES cloned_bots (bot_token)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    logger.info("✅ Database initialized successfully")
 
-        if tx_hash:
-            logger.info(f"Transaction successful: {tx_hash}")
-            return tx_hash
-        return None
+
+# ===================== DATABASE FUNCTIONS FOR CLONED BOTS =====================
+
+async def add_cloned_bot(bot_token: str, bot_username: str, bot_name: str, created_by: int) -> bool:
+    """Tambahkan bot clone ke database."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO cloned_bots 
+            (bot_token, bot_username, bot_name, status, created_by, created_at)
+            VALUES (?, ?, ?, 'stopped', ?, ?)
+        ''', (bot_token, bot_username, bot_name, created_by, datetime.now().isoformat()))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ Bot clone {bot_username} added to database")
+        return True
+    except Exception as e:
+        logger.error(f"Error adding cloned bot: {e}")
+        return False
+
+
+async def get_cloned_bots(status: str = None) -> List[Dict]:
+    """Ambil daftar bot clone."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        if status:
+            cursor.execute('''
+                SELECT id, bot_token, bot_username, bot_name, status, created_by, created_at, 
+                       last_started, last_stopped, pid
+                FROM cloned_bots WHERE status = ?
+                ORDER BY created_at DESC
+            ''', (status,))
+        else:
+            cursor.execute('''
+                SELECT id, bot_token, bot_username, bot_name, status, created_by, created_at, 
+                       last_started, last_stopped, pid
+                FROM cloned_bots ORDER BY created_at DESC
+            ''')
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        bots = []
+        for row in rows:
+            bots.append({
+                'id': row[0],
+                'bot_token': row[1],
+                'bot_username': row[2],
+                'bot_name': row[3],
+                'status': row[4],
+                'created_by': row[5],
+                'created_at': row[6],
+                'last_started': row[7],
+                'last_stopped': row[8],
+                'pid': row[9]
+            })
+        return bots
+    except Exception as e:
+        logger.error(f"Error getting cloned bots: {e}")
+        return []
+
+
+async def update_bot_status(bot_token: str, status: str, pid: int = None):
+    """Update status bot clone."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        now = datetime.now().isoformat()
+        
+        if status == 'running':
+            cursor.execute('''
+                UPDATE cloned_bots 
+                SET status = ?, last_started = ?, pid = ?
+                WHERE bot_token = ?
+            ''', (status, now, pid, bot_token))
+        elif status == 'stopped':
+            cursor.execute('''
+                UPDATE cloned_bots 
+                SET status = ?, last_stopped = ?, pid = NULL
+                WHERE bot_token = ?
+            ''', (status, now, bot_token))
+        else:
+            cursor.execute('''
+                UPDATE cloned_bots SET status = ? WHERE bot_token = ?
+            ''', (status, bot_token))
+        
+        conn.commit()
+        conn.close()
+        
+        # Log ke bot_logs
+        await add_bot_log(bot_token, "INFO", f"Bot status changed to {status}")
         
     except Exception as e:
-        logger.error(f"Error in pay_stars_order: {e}")
-        return None
+        logger.error(f"Error updating bot status: {e}")
 
 
-# ===================== BOT INITIALIZATION =====================
-print("Starting bot...")
-bot = TelegramClient('fragment_bot_session', API_ID, API_HASH)
+async def add_bot_log(bot_token: str, log_level: str, message: str):
+    """Tambah log untuk bot clone."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO bot_logs (bot_token, log_level, message, timestamp)
+            VALUES (?, ?, ?, ?)
+        ''', (bot_token, log_level, message, datetime.now().isoformat()))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error adding bot log: {e}")
 
-# State management
-user_states: Dict[int, str] = {}
-user_data: Dict[int, Dict[str, Any]] = {}
 
-STATE_IDLE = "idle"
-STATE_WAITING_USERNAME = "waiting_username"
-STATE_WAITING_STARS = "waiting_stars"
-STATE_WAITING_SENDER_OPTION = "waiting_sender_option"
-STATE_CONFIRM_PURCHASE = "confirm_purchase"
+async def remove_cloned_bot(bot_token: str) -> bool:
+    """Hapus bot clone dari database."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM cloned_bots WHERE bot_token = ?', (bot_token,))
+        cursor.execute('DELETE FROM bot_logs WHERE bot_token = ?', (bot_token,))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error removing cloned bot: {e}")
+        return False
 
+
+# ===================== BOT CLONE MANAGEMENT =====================
+
+def get_bot_script_path() -> str:
+    """Dapatkan path script bot clone."""
+    return os.path.abspath(__file__)
+
+
+async def start_cloned_bot(bot_token: str, bot_username: str) -> bool:
+    """Jalankan bot clone sebagai proses terpisah."""
+    try:
+        # Cek apakah bot sudah berjalan
+        if bot_token in running_bots:
+            proc = running_bots[bot_token]
+            if proc.poll() is None:
+                logger.info(f"Bot {bot_username} already running")
+                return True
+        
+        # Buat environment untuk bot clone
+        env = os.environ.copy()
+        env["BOT_TOKEN"] = bot_token
+        env["IS_CLONE"] = "true"
+        env["MASTER_BOT_TOKEN"] = BOT_TOKEN
+        
+        # Jalankan proses baru
+        proc = subprocess.Popen(
+            [sys.executable, get_bot_script_path()],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        running_bots[bot_token] = proc
+        await update_bot_status(bot_token, 'running', proc.pid)
+        
+        logger.info(f"✅ Started cloned bot: {bot_username} (PID: {proc.pid})")
+        
+        # Monitor proses secara async
+        asyncio.create_task(monitor_bot_process(bot_token, bot_username, proc))
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error starting cloned bot: {e}")
+        await update_bot_status(bot_token, 'error')
+        return False
+
+
+async def stop_cloned_bot(bot_token: str, bot_username: str) -> bool:
+    """Hentikan bot clone."""
+    try:
+        if bot_token in running_bots:
+            proc = running_bots[bot_token]
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            
+            del running_bots[bot_token]
+        
+        await update_bot_status(bot_token, 'stopped')
+        logger.info(f"✅ Stopped cloned bot: {bot_username}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error stopping cloned bot: {e}")
+        return False
+
+
+async def monitor_bot_process(bot_token: str, bot_username: str, proc: subprocess.Popen):
+    """Monitor proses bot clone."""
+    try:
+        # Monitor stdout
+        async def read_output(pipe, log_level):
+            for line in iter(pipe.readline, ''):
+                if line:
+                    await add_bot_log(bot_token, log_level, line.strip())
+        
+        # Jalankan monitoring di thread pool
+        loop = asyncio.get_event_loop()
+        
+        stdout_task = loop.run_in_executor(None, read_output, proc.stdout, "INFO")
+        stderr_task = loop.run_in_executor(None, read_output, proc.stderr, "ERROR")
+        
+        # Tunggu proses selesai
+        await asyncio.get_event_loop().run_in_executor(None, proc.wait)
+        
+        # Proses selesai, update status
+        if bot_token in running_bots:
+            del running_bots[bot_token]
+        
+        await update_bot_status(bot_token, 'stopped')
+        logger.info(f"Bot {bot_username} process ended")
+        
+    except Exception as e:
+        logger.error(f"Error monitoring bot {bot_username}: {e}")
+        await update_bot_status(bot_token, 'error')
+
+
+async def start_all_cloned_bots():
+    """Jalankan semua bot clone yang statusnya running."""
+    bots = await get_cloned_bots('running')
+    for bot in bots:
+        await start_cloned_bot(bot['bot_token'], bot['bot_username'])
+
+
+async def stop_all_cloned_bots():
+    """Hentikan semua bot clone."""
+    for bot_token, proc in list(running_bots.items()):
+        if proc.poll() is None:
+            proc.terminate()
+    running_bots.clear()
+
+
+# ===================== FRAGMENT API FUNCTIONS (SAME AS ORIGINAL) =====================
+# [Keep all your existing Fragment API functions - they remain the same]
+# encoded(), post(), get_user_address(), init_buy_stars(), get_buy_stars()
+
+# ===================== WALLET FUNCTIONS =====================
+# [Keep all your existing wallet functions]
+
+# ===================== WRAPPER FUNCTIONS =====================
+# [Keep all your existing wrapper functions]
 
 # ===================== HELPER FUNCTIONS =====================
+# [Keep all your existing helper functions]
 
-async def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+# ===================== BOT HANDLERS (EXTENDED) =====================
 
-
-async def check_config() -> tuple[bool, bool]:
-    fragment_ok = bool(COOKIES and HASH)
-    wallet_ok = bool(WALLET_API_KEY and WALLET_MNEMONIC)
-    return fragment_ok, wallet_ok
-
-
-def format_number(num: int) -> str:
-    return f"{num:,}".replace(",", ".")
-
-
-def calculate_price(stars: int) -> float:
-    return stars * PRICE_PER_STAR
-
-
-def clean_username(username: str) -> str:
-    return username.strip().replace('@', '')
-
-
-# ===================== HANDLERS =====================
-
-@bot.on(events.NewMessage(pattern='/start'))
-async def start_handler(event):
-    user = await event.get_sender()
+@bot.on(events.NewMessage(pattern='/clone'))
+async def clone_bot_handler(event):
+    """Handler untuk clone bot baru."""
     user_id = event.sender_id
     
-    # Simpan user ke database
-    await save_user(
-        user_id=user_id,
-        username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        admin_ids=ADMIN_IDS
-    )
-    
-    # Log aktivitas
-    await log_activity(user_id, "start", "User started the bot")
-    
-    fragment_ok, wallet_ok = await check_config()
-    
-    # Ambil statistik user
-    user_stats = await get_user_stats(user_id)
-
-    welcome_text = (
-        f"🌟 **Selamat Datang di Fragment Stars Bot** 🌟\n\n"
-        f"Halo {user.first_name}!\n\n"
-        f"**Informasi:**\n"
-        f"• 💰 Harga: `{PRICE_PER_STAR}` TON per star\n"
-        f"• 📊 Minimal: `{MIN_STARS}` stars\n"
-        f"• 📈 Maksimal: `{MAX_STARS}` stars\n\n"
-        f"**Statistik Anda:**\n"
-        f"• Total Pembelian: {user_stats['total_purchases']}\n"
-        f"• Total Stars: {format_number(user_stats['total_stars'])}\n"
-        f"• Total Pengeluaran: {user_stats['total_spent']:.2f} TON\n\n"
-    )
-    
-    if not fragment_ok:
-        welcome_text += "⚠️ **Fragment API tidak aktif**\n"
-    if not wallet_ok:
-        welcome_text += "⚠️ **Wallet tidak aktif**\n"
-    
-    buttons = [
-        [Button.inline("🛒 Beli Stars", data="buy")],
-        [Button.inline("ℹ️ Cara Pakai", data="howto")],
-        [Button.inline("📊 Statistik Saya", data="mystats")],
-    ]
-    
-    if await is_admin(user_id):
-        buttons.append([Button.inline("⚙️ Admin Panel", data="admin")])
-    
-    await event.respond(welcome_text, buttons=buttons, parse_mode='markdown')
-
-
-@bot.on(events.NewMessage(pattern='/buy'))
-async def buy_command(event):
-    user_id = event.sender_id
-    fragment_ok, wallet_ok = await check_config()
-    
-    await log_activity(user_id, "buy_command", "User initiated buy command")
-    
-    if not fragment_ok or not wallet_ok:
-        await event.respond("❌ **Bot belum siap digunakan**")
+    if not await is_admin(user_id):
+        await event.respond("❌ Akses ditolak! Hanya admin yang bisa clone bot.")
         return
     
-    # Hapus pending purchase sebelumnya
-    await delete_pending_purchase(user_id)
+    # Parse command: /clone <bot_token> [bot_username]
+    parts = event.message.text.split()
+    if len(parts) < 2:
+        await event.respond(
+            "❌ **Format salah!**\n\n"
+            "Gunakan: `/clone <bot_token> [bot_username]`\n\n"
+            "Contoh: `/clone 123456:ABCdefg my_bot`",
+            parse_mode='markdown'
+        )
+        return
     
-    user_states[user_id] = STATE_WAITING_USERNAME
-    user_data[user_id] = {}
+    bot_token = parts[1]
+    bot_username = parts[2] if len(parts) > 2 else None
     
-    await event.respond(
-        "🛒 **Mulai Pembelian Stars**\n\n"
-        "Silakan masukkan **username** penerima:\n"
-        "_(Contoh: @username atau username)_\n\n"
-        "Ketik /cancel untuk membatalkan.",
-        parse_mode='markdown'
-    )
+    # Validasi bot token
+    if not bot_token or ':' not in bot_token:
+        await event.respond("❌ Bot token tidak valid! Format: `123456:ABCdefg`")
+        return
+    
+    await event.respond("⏳ **Mengecek bot token...**")
+    
+    # Cek apakah bot token valid dengan mencoba connect
+    try:
+        temp_client = TelegramClient(f'temp_{user_id}', API_ID, API_HASH)
+        await temp_client.start(bot_token=bot_token)
+        me = await temp_client.get_me()
+        await temp_client.disconnect()
+        
+        bot_username = bot_username or me.username or f"bot_{me.id}"
+        bot_name = me.first_name or "Fragment Stars Bot"
+        
+        # Simpan ke database
+        success = await add_cloned_bot(bot_token, bot_username, bot_name, user_id)
+        
+        if success:
+            # Jalankan bot
+            await start_cloned_bot(bot_token, bot_username)
+            
+            await event.respond(
+                f"✅ **Bot Berhasil Di-clone!**\n\n"
+                f"**Nama:** {bot_name}\n"
+                f"**Username:** @{bot_username}\n"
+                f"**Token:** `{bot_token[:20]}...`\n\n"
+                f"Bot sedang berjalan. Gunakan `/listbots` untuk melihat semua bot.",
+                parse_mode='markdown'
+            )
+            
+            # Log aktivitas
+            await log_activity(user_id, "clone_bot", f"Cloned bot: {bot_username}")
+        else:
+            await event.respond("❌ Gagal menyimpan bot ke database!")
+            
+    except Exception as e:
+        await event.respond(f"❌ **Error:** Bot token tidak valid!\n\n{str(e)[:100]}")
+        logger.error(f"Error validating bot token: {e}")
 
 
-@bot.on(events.NewMessage(pattern='/cancel'))
-async def cancel_command(event):
+@bot.on(events.NewMessage(pattern='/listbots'))
+async def list_bots_handler(event):
+    """Handler untuk menampilkan daftar bot clone."""
     user_id = event.sender_id
     
-    await log_activity(user_id, "cancel", "User cancelled operation")
+    if not await is_admin(user_id):
+        await event.respond("❌ Akses ditolak!")
+        return
     
-    # Hapus pending purchase dari database
-    await delete_pending_purchase(user_id)
+    bots = await get_cloned_bots()
     
-    if user_id in user_states:
-        del user_states[user_id]
-    if user_id in user_data:
-        del user_data[user_id]
+    if not bots:
+        await event.respond("📭 **Belum ada bot yang di-clone.**\n\nGunakan `/clone <token>` untuk menambah bot.")
+        return
     
-    await event.respond(
-        "✅ **Operasi dibatalkan.**",
-        parse_mode='markdown'
-    )
+    text = "🤖 **Daftar Bot Clone**\n\n"
+    
+    for bot in bots:
+        status_emoji = "🟢" if bot['status'] == 'running' else "🔴"
+        text += f"{status_emoji} **@{bot['bot_username']}**\n"
+        text += f"   • Nama: {bot['bot_name']}\n"
+        text += f"   • Status: {bot['status']}\n"
+        text += f"   • ID: {bot['id']}\n"
+        if bot['pid']:
+            text += f"   • PID: {bot['pid']}\n"
+        text += "\n"
+    
+    await event.respond(text, parse_mode='markdown')
 
 
-@bot.on(events.NewMessage(pattern='/stats'))
-async def stats_command(event):
+@bot.on(events.NewMessage(pattern='/startbot'))
+async def start_bot_handler(event):
+    """Handler untuk menjalankan bot clone tertentu."""
     user_id = event.sender_id
     
-    user_stats = await get_user_stats(user_id)
+    if not await is_admin(user_id):
+        await event.respond("❌ Akses ditolak!")
+        return
     
-    stats_text = (
-        "📊 **Statistik Pengguna**\n\n"
-        f"• Total Pembelian: {user_stats['total_purchases']}\n"
-        f"• Total Stars: {format_number(user_stats['total_stars'])}\n"
-        f"• Total Pengeluaran: {user_stats['total_spent']:.2f} TON\n"
-        f"• Pembelian Hari Ini: {user_stats['today_purchases']}"
+    parts = event.message.text.split()
+    if len(parts) < 2:
+        await event.respond("❌ Gunakan: `/startbot <bot_username>`")
+        return
+    
+    bot_username = parts[1]
+    bots = await get_cloned_bots()
+    
+    for bot in bots:
+        if bot['bot_username'] == bot_username:
+            if bot['status'] == 'running':
+                await event.respond(f"⚠️ Bot @{bot_username} sudah berjalan!")
+                return
+            
+            success = await start_cloned_bot(bot['bot_token'], bot['bot_username'])
+            if success:
+                await event.respond(f"✅ Bot @{bot_username} berhasil dijalankan!")
+            else:
+                await event.respond(f"❌ Gagal menjalankan bot @{bot_username}!")
+            return
+    
+    await event.respond(f"❌ Bot @{bot_username} tidak ditemukan!")
+
+
+@bot.on(events.NewMessage(pattern='/stopbot'))
+async def stop_bot_handler(event):
+    """Handler untuk menghentikan bot clone tertentu."""
+    user_id = event.sender_id
+    
+    if not await is_admin(user_id):
+        await event.respond("❌ Akses ditolak!")
+        return
+    
+    parts = event.message.text.split()
+    if len(parts) < 2:
+        await event.respond("❌ Gunakan: `/stopbot <bot_username>`")
+        return
+    
+    bot_username = parts[1]
+    bots = await get_cloned_bots()
+    
+    for bot in bots:
+        if bot['bot_username'] == bot_username:
+            if bot['status'] != 'running':
+                await event.respond(f"⚠️ Bot @{bot_username} tidak sedang berjalan!")
+                return
+            
+            success = await stop_cloned_bot(bot['bot_token'], bot['bot_username'])
+            if success:
+                await event.respond(f"✅ Bot @{bot_username} berhasil dihentikan!")
+            else:
+                await event.respond(f"❌ Gagal menghentikan bot @{bot_username}!")
+            return
+    
+    await event.respond(f"❌ Bot @{bot_username} tidak ditemukan!")
+
+
+@bot.on(events.NewMessage(pattern='/delbot'))
+async def delete_bot_handler(event):
+    """Handler untuk menghapus bot clone."""
+    user_id = event.sender_id
+    
+    if not await is_admin(user_id):
+        await event.respond("❌ Akses ditolak!")
+        return
+    
+    parts = event.message.text.split()
+    if len(parts) < 2:
+        await event.respond("❌ Gunakan: `/delbot <bot_username>`")
+        return
+    
+    bot_username = parts[1]
+    bots = await get_cloned_bots()
+    
+    for bot in bots:
+        if bot['bot_username'] == bot_username:
+            # Hentikan bot jika berjalan
+            if bot['status'] == 'running':
+                await stop_cloned_bot(bot['bot_token'], bot['bot_username'])
+            
+            # Hapus dari database
+            success = await remove_cloned_bot(bot['bot_token'])
+            if success:
+                await event.respond(f"✅ Bot @{bot_username} berhasil dihapus!")
+            else:
+                await event.respond(f"❌ Gagal menghapus bot @{bot_username}!")
+            return
+    
+    await event.respond(f"❌ Bot @{bot_username} tidak ditemukan!")
+
+
+@bot.on(events.NewMessage(pattern='/botlog'))
+async def bot_log_handler(event):
+    """Handler untuk melihat log bot clone."""
+    user_id = event.sender_id
+    
+    if not await is_admin(user_id):
+        await event.respond("❌ Akses ditolak!")
+        return
+    
+    parts = event.message.text.split()
+    if len(parts) < 2:
+        await event.respond("❌ Gunakan: `/botlog <bot_username> [limit]`")
+        return
+    
+    bot_username = parts[1]
+    limit = int(parts[2]) if len(parts) > 2 else 20
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT log_level, message, timestamp FROM bot_logs 
+            WHERE bot_token IN (SELECT bot_token FROM cloned_bots WHERE bot_username = ?)
+            ORDER BY timestamp DESC LIMIT ?
+        ''', (bot_username, limit))
+        
+        logs = cursor.fetchall()
+        conn.close()
+        
+        if not logs:
+            await event.respond(f"📭 Tidak ada log untuk bot @{bot_username}")
+            return
+        
+        text = f"📋 **Log Bot @{bot_username}** (last {len(logs)})\n\n"
+        for log_level, message, ts in reversed(logs):
+            emoji = "ℹ️" if log_level == "INFO" else "⚠️" if log_level == "WARNING" else "❌"
+            text += f"{emoji} {ts[11:19]} [{log_level}] {message[:100]}\n"
+        
+        if len(text) > 4000:
+            text = text[:4000] + "\n\n... (truncated)"
+        
+        await event.respond(text, parse_mode='markdown')
+        
+    except Exception as e:
+        await event.respond(f"❌ Error: {str(e)[:100]}")
+        logger.error(f"Error getting bot logs: {e}")
+
+
+# ===================== MODIFIED ADMIN PANEL =====================
+
+@bot.on(events.NewMessage(pattern='/admin'))
+async def admin_panel(event):
+    """Panel admin dengan informasi bot clone."""
+    user_id = event.sender_id
+    
+    if not await is_admin(user_id):
+        await event.respond("❌ Akses ditolak!")
+        return
+    
+    # Ambil statistik
+    stats = await get_all_stats()
+    bots = await get_cloned_bots()
+    
+    running_bots_count = len([b for b in bots if b['status'] == 'running'])
+    total_bots = len(bots)
+    
+    text = (
+        "⚙️ **Panel Admin Bot Master**\n\n"
+        f"**Status Bot Master:**\n"
+        f"• Fragment API: {'✅' if COOKIES and HASH else '❌'}\n"
+        f"• Wallet: {'✅' if WALLET_API_KEY and WALLET_MNEMONIC else '❌'}\n\n"
+        f"**Bot Clone:**\n"
+        f"• Total Bot: {total_bots}\n"
+        f"• Running: {running_bots_count}\n"
+        f"• Stopped: {total_bots - running_bots_count}\n\n"
+        f"**Statistik Keseluruhan:**\n"
+        f"• Total User: {stats['total_users']}\n"
+        f"• Total Pembelian: {stats['total_purchases']}\n"
+        f"• Total Stars: {format_number(stats['total_stars'])}\n"
+        f"• Total Volume: {stats['total_volume']:.2f} TON\n\n"
+        f"**Commands:**\n"
+        f"/clone <token> - Clone bot baru\n"
+        f"/listbots - Lihat semua bot\n"
+        f"/startbot <username> - Jalankan bot\n"
+        f"/stopbot <username> - Hentikan bot\n"
+        f"/delbot <username> - Hapus bot\n"
+        f"/botlog <username> - Lihat log bot"
     )
     
-    await event.respond(stats_text, parse_mode='markdown')
-    await log_activity(user_id, "stats", "User viewed their stats")
+    buttons = [
+        [Button.inline("💰 Cek Saldo", data="balance")],
+        [Button.inline("📊 Detail Statistik", data="admin_stats")],
+        [Button.inline("🔄 Restart All Bots", data="restart_all")],
+        [Button.inline("🔙 Kembali", data="start")]
+    ]
+    
+    await event.respond(text, buttons=buttons, parse_mode='markdown')
 
 
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
+    """Extended callback handler untuk admin panel."""
     user_id = event.sender_id
     data = event.data.decode('utf-8')
     
-    # Handler untuk memilih TAMPILKAN NAMA
-    if data.startswith("sender_show_"):
-        user_data[user_id]['show_sender'] = True
-        await save_pending_purchase(
-            user_id=user_id,
-            username=user_data[user_id]['username'],
-            nickname=user_data[user_id]['nickname'],
-            address=user_data[user_id]['address'],
-            stars=user_data[user_id]['stars'],
-            price=user_data[user_id]['price'],
-            show_sender=True,
-            state=STATE_WAITING_SENDER_OPTION
-        )
-        await show_confirmation(event, user_id)
-        await log_activity(user_id, "sender_option", "User chose to show sender name")
-        return
-    
-    # Handler untuk memilih SEMBUNYIKAN NAMA
-    elif data.startswith("sender_hide_"):
-        user_data[user_id]['show_sender'] = False
-        await save_pending_purchase(
-            user_id=user_id,
-            username=user_data[user_id]['username'],
-            nickname=user_data[user_id]['nickname'],
-            address=user_data[user_id]['address'],
-            stars=user_data[user_id]['stars'],
-            price=user_data[user_id]['price'],
-            show_sender=False,
-            state=STATE_WAITING_SENDER_OPTION
-        )
-        await show_confirmation(event, user_id)
-        await log_activity(user_id, "sender_option", "User chose to hide sender name")
-        return
-    
-    # Handler untuk kembali ke opsi sender
-    elif data.startswith("sender_back_"):
-        if user_id not in user_data:
-            await event.answer("Sesi telah berakhir, silakan mulai lagi.", alert=True)
-            return
-        await ask_sender_option(event, user_id)
-        return
-    
-    # Handler untuk konfirmasi
-    elif data.startswith("confirm_"):
-        await confirm_purchase(event, user_id)
-        return
-    
-    # Handler untuk cancel
-    elif data.startswith("cancel_"):
-        await cancel_purchase(event, user_id)
-        return
-    
-    # Menu utama
-    elif data == "buy":
-        user_states[user_id] = STATE_WAITING_USERNAME
-        user_data[user_id] = {}
-        await delete_pending_purchase(user_id)
-        await event.edit(
-            "🛒 **Mulai Pembelian Stars**\n\n"
-            "Silakan masukkan **username** penerima:\n"
-            "_(Contoh: @username atau username)_\n\n"
-            "Ketik /cancel untuk membatalkan.",
-            parse_mode='markdown'
-        )
-        await log_activity(user_id, "buy", "User started new purchase")
-    
-    elif data == "howto":
-        await event.edit(
-            "📖 **Cara Menggunakan Bot**\n\n"
-            "1️⃣ Klik 'Beli Stars' atau ketik /buy\n"
-            "2️⃣ Masukkan username penerima\n"
-            "3️⃣ Masukkan jumlah stars\n"
-            "4️⃣ Pilih opsi pengirim (Tampilkan/Sembunyikan nama)\n"
-            "5️⃣ Konfirmasi pembelian\n"
-            "6️⃣ Tunggu proses selesai\n\n"
-            "**Penting:**\n"
-            "• Pastikan wallet memiliki saldo cukup\n"
-            "• Transaksi tidak dapat dibatalkan\n\n"
-            "**Opsi Pengirim:**\n"
-            "• **Tampilkan nama** - Penerima melihat nama akun Fragment Anda\n"
-            "• **Sembunyikan (Gift)** - Muncul sebagai hadiah dari Telegram (anonim)",
-            buttons=[Button.inline("🔙 Kembali", data="start")],
-            parse_mode='markdown'
-        )
-        await log_activity(user_id, "howto", "User viewed how-to guide")
-    
-    elif data == "mystats":
-        user_stats = await get_user_stats(user_id)
-        
-        stats_text = (
-            "📊 **Statistik Anda**\n\n"
-            f"• Total Pembelian: {user_stats['total_purchases']}\n"
-            f"• Total Stars: {format_number(user_stats['total_stars'])}\n"
-            f"• Total Pengeluaran: {user_stats['total_spent']:.2f} TON\n"
-            f"• Pembelian Hari Ini: {user_stats['today_purchases']}\n\n"
-            f"_Terakhir update: {datetime.now().strftime('%H:%M:%S')}_"
-        )
-        
-        await event.edit(
-            stats_text,
-            buttons=[Button.inline("🔙 Kembali", data="start")],
-            parse_mode='markdown'
-        )
-        await log_activity(user_id, "mystats", "User viewed their stats")
-    
-    elif data == "admin":
+    if data == "restart_all":
         if not await is_admin(user_id):
             await event.answer("Akses ditolak!", alert=True)
             return
         
-        stats = await get_all_stats()
+        await event.edit("⏳ **Merestart semua bot...**")
         
-        admin_text = (
-            "⚙️ **Panel Admin**\n\n"
-            f"• Status: Aktif\n"
-            f"• Fragment API: {'✅' if COOKIES and HASH else '❌'}\n"
-            f"• Wallet: {'✅' if WALLET_API_KEY and WALLET_MNEMONIC else '❌'}\n\n"
-            f"**Statistik Bot:**\n"
-            f"• Total User: {stats['total_users']}\n"
-            f"• User Aktif Hari Ini: {stats['active_today']}\n"
-            f"• Total Pembelian: {stats['total_purchases']}\n"
-            f"• Total Stars: {format_number(stats['total_stars'])}\n"
-            f"• Total Volume: {stats['total_volume']:.2f} TON\n"
-            f"• Pembelian Hari Ini: {stats['today_purchases']}\n"
-            f"• Stars Hari Ini: {format_number(stats['today_stars'])}\n"
-            f"• Volume Hari Ini: {stats['today_volume']:.2f} TON\n\n"
-            f"• Pengguna Aktif Saat Ini: {len(user_states)}"
-        )
-        buttons = [
-            [Button.inline("💰 Cek Saldo", data="balance")],
-            [Button.inline("📊 Detail Statistik", data="admin_stats")],
-            [Button.inline("🔄 Restart Bot", data="restart")],
-            [Button.inline("🔙 Kembali", data="start")]
-        ]
-        await event.edit(admin_text, buttons=buttons, parse_mode='markdown')
-        await log_activity(user_id, "admin", "Admin accessed admin panel")
-    
-    elif data == "admin_stats":
-        if not await is_admin(user_id):
-            await event.answer("Akses ditolak!", alert=True)
-            return
+        # Stop all bots
+        await stop_all_cloned_bots()
         
-        recent_purchases = await get_recent_purchases(10)
-        
-        stats_text = "📊 **10 Pembelian Terakhir**\n\n"
-        for i, purchase in enumerate(recent_purchases, 1):
-            uid, recipient, stars, price, status, ts = purchase
-            stats_text += f"{i}. User: {uid}\n   → @{recipient}: {stars} stars ({price:.2f} TON)\n   Status: {status}\n   {ts[:19]}\n\n"
+        # Start all bots that should be running
+        await start_all_cloned_bots()
         
         await event.edit(
-            stats_text,
-            buttons=[Button.inline("🔙 Kembali", data="admin")],
-            parse_mode='markdown'
+            "✅ **Semua bot telah direstart!**",
+            buttons=[Button.inline("🔙 Kembali ke Admin", data="admin")]
         )
-    
-    elif data == "balance":
-        if not await is_admin(user_id):
-            await event.answer("Akses ditolak!", alert=True)
-            return
-        
-        try:
-            await event.edit("⏳ **Mengambil saldo...**")
-            balance = await get_balance(WALLET_API_KEY, WALLET_MNEMONIC)
-            await event.edit(
-                f"💰 **Saldo Wallet**\n\n"
-                f"Saldo: `{balance:.2f}` TON\n\n"
-                f"_Update terakhir: {datetime.now().strftime('%H:%M:%S')}_",
-                buttons=[
-                    [Button.inline("🔄 Refresh", data="balance")],
-                    [Button.inline("🔙 Kembali", data="admin")]
-                ],
-                parse_mode='markdown'
-            )
-            await log_activity(user_id, "check_balance", f"Balance: {balance:.2f} TON")
-        except Exception as e:
-            logger.error(f"Error cek saldo: {e}")
-            await event.edit(
-                "❌ Gagal cek saldo",
-                buttons=[Button.inline("🔙 Kembali", data="admin")]
-            )
-    
-    elif data == "restart":
-        if not await is_admin(user_id):
-            await event.answer("Akses ditolak!", alert=True)
-            return
-        
-        user_states.clear()
-        user_data.clear()
-        
-        # Hapus semua pending purchases
-        conn = sqlite3.connect("frag.db")
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM pending_purchases')
-        conn.commit()
-        conn.close()
-        
-        await event.edit(
-            "✅ **Bot telah di-restart**\n\n"
-            "Semua sesi pengguna telah dihapus.",
-            buttons=[Button.inline("🏠 Kembali ke Menu", data="start")],
-            parse_mode='markdown'
-        )
-        await log_activity(user_id, "restart", "Bot was restarted by admin")
-    
-    elif data == "start":
-        await start_handler(event)
-    
-    else:
-        logger.warning(f"Unknown callback data: {data} from user {user_id}")
-        await event.answer("Perintah tidak dikenal!", alert=True)
-
-
-@bot.on(events.NewMessage)
-async def message_handler(event):
-    user_id = event.sender_id
-    message = event.message.text.strip()
-    
-    if user_id not in user_states:
         return
     
-    state = user_states[user_id]
-    
-    if message.lower() == '/cancel':
-        await cancel_command(event)
-        return
-    
-    if state == STATE_WAITING_USERNAME:
-        await process_username(event, user_id, message)
-    elif state == STATE_WAITING_STARS:
-        await process_stars(event, user_id, message)
+    # Call other callback handlers...
+    # [Keep all existing callback handlers]
 
 
-# ===================== PROSES PEMBELIAN =====================
-
-async def process_username(event, user_id: int, username: str):
-    clean_name = clean_username(username)
-    
-    if not clean_name:
-        await event.respond("❌ Username tidak valid")
-        return
-    
-    async with bot.action(event.chat_id, 'typing'):
-        await event.respond("🔍 **Mencari username...**")
-        
-        try:
-            user_info = await get_user(clean_name)
-            
-            if not user_info:
-                await event.respond(
-                    f"❌ Username **@{clean_name}** tidak ditemukan.",
-                    parse_mode='markdown'
-                )
-                return
-            
-            user_data[user_id]['username'] = clean_name
-            user_data[user_id]['nickname'] = user_info['nickname']
-            user_data[user_id]['address'] = user_info['address']
-            
-            user_states[user_id] = STATE_WAITING_STARS
-            
-            await event.respond(
-                f"✅ **User Ditemukan:** {user_info['nickname']}\n\n"
-                f"Masukkan **jumlah stars** (angka):\n"
-                f"Min: {MIN_STARS:,} - Max: {MAX_STARS:,}",
-                parse_mode='markdown'
-            )
-            
-        except Exception as e:
-            logger.error(f"Error: {e}")
-            await event.respond("❌ Terjadi kesalahan.")
-
-
-async def process_stars(event, user_id: int, stars_str: str):
-    try:
-        stars = int(stars_str)
-        
-        if stars < MIN_STARS:
-            await event.respond(f"❌ Minimal {MIN_STARS:,} stars")
-            return
-        
-        if stars > MAX_STARS:
-            await event.respond(f"❌ Maksimal {MAX_STARS:,} stars")
-            return
-        
-        user_data[user_id]['stars'] = stars
-        user_data[user_id]['price'] = calculate_price(stars)
-        
-        await ask_sender_option(event, user_id)
-        
-    except ValueError:
-        await event.respond("❌ Masukkan angka yang valid.")
-
-
-async def ask_sender_option(event, user_id: int):
-    """Tanya user apakah ingin menampilkan nama pengirim atau tidak."""
-    
-    option_text = (
-        "👤 **Opsi Pengirim**\n\n"
-        "Pilih bagaimana nama pengirim ditampilkan:\n\n"
-        "✅ **Tampilkan nama saya** - Penerima akan melihat nama akun Fragment Anda sebagai pengirim\n"
-        "❌ **Sembunyikan nama** - Akan muncul sebagai hadiah dari Telegram (anonim)\n\n"
-        "Pilih opsi di bawah:"
-    )
-    
-    buttons = [
-        [
-            Button.inline("👤 Tampilkan Nama Saya", data=f"sender_show_{user_id}"),
-            Button.inline("🎁 Sembunyikan (Gift)", data=f"sender_hide_{user_id}")
-        ]
-    ]
-    
-    user_states[user_id] = STATE_WAITING_SENDER_OPTION
-    await event.respond(option_text, buttons=buttons, parse_mode='markdown')
-
-
-async def show_confirmation(event, user_id: int):
-    data = user_data[user_id]
-    
-    sender_text = "👤 Menampilkan nama saya" if data.get('show_sender', True) else "🎁 Sembunyikan (Gift mode)"
-    
-    confirm_text = (
-        "📝 **Konfirmasi Pembelian**\n\n"
-        f"**Penerima:** {data['nickname']}\n"
-        f"**Username:** @{data['username']}\n"
-        f"**Stars:** {format_number(data['stars'])}\n"
-        f"**Harga:** {data['price']:.2f} TON\n"
-        f"**Opsi Pengirim:** {sender_text}\n\n"
-        "⚠️ Transaksi tidak dapat dibatalkan!\n\n"
-        "Setuju?"
-    )
-    
-    buttons = [
-        [
-            Button.inline("✅ Ya", data=f"confirm_{user_id}"),
-            Button.inline("❌ Tidak", data=f"cancel_{user_id}")
-        ],
-        [Button.inline("🔙 Ubah Opsi Pengirim", data=f"sender_back_{user_id}")]
-    ]
-    
-    user_states[user_id] = STATE_CONFIRM_PURCHASE
-    await event.respond(confirm_text, buttons=buttons, parse_mode='markdown')
-
-
-async def confirm_purchase(event, user_id: int):
-    if user_id not in user_data:
-        await event.edit("❌ Sesi kadaluarsa.")
-        return
-    
-    purchase_data = user_data[user_id]
-    
-    show_sender = purchase_data.get('show_sender', True)
-    
-    await event.edit(
-        "⏳ **Memproses pembelian...**\n\n"
-        f"Penerima: @{purchase_data['username']}\n"
-        f"Stars: {format_number(purchase_data['stars'])}\n"
-        f"Opsi: {'Tampilkan nama' if show_sender else 'Sembunyikan (Gift)'}",
-        parse_mode='markdown'
-    )
-    
-    # Catat pembelian dengan status pending
-    await save_purchase(
-        user_id=user_id,
-        recipient_username=purchase_data['username'],
-        recipient_nickname=purchase_data['nickname'],
-        stars_amount=purchase_data['stars'],
-        price_ton=purchase_data['price'],
-        show_sender=show_sender,
-        status="pending"
-    )
-    
-    try:
-        tx_hash = await pay_stars_order(
-            username=purchase_data['username'],
-            quantity=purchase_data['stars'],
-            show_sender=show_sender
-        )
-        
-        if tx_hash:
-            # Update status menjadi success
-            await save_purchase(
-                user_id=user_id,
-                recipient_username=purchase_data['username'],
-                recipient_nickname=purchase_data['nickname'],
-                stars_amount=purchase_data['stars'],
-                price_ton=purchase_data['price'],
-                tx_hash=tx_hash,
-                show_sender=show_sender,
-                status="success"
-            )
-            
-            success_text = (
-                "✅ **Pembelian Berhasil!**\n\n"
-                f"**Penerima:** @{purchase_data['username']}\n"
-                f"**Stars:** {format_number(purchase_data['stars'])}\n"
-                f"**Harga:** {purchase_data['price']:.2f} TON\n"
-                f"**Opsi:** {'👤 Nama ditampilkan' if show_sender else '🎁 Gift mode (anonim)'}\n"
-                f"**Hash:** `{tx_hash}`\n\n"
-                f"[Lihat di TON Viewer](https://tonviewer.com/transaction/{tx_hash})"
-            )
-            
-            await event.edit(
-                success_text,
-                buttons=[Button.inline("🛒 Beli Lagi", data="buy")],
-                parse_mode='markdown',
-                link_preview=False
-            )
-            
-            await notify_admins(purchase_data, tx_hash, show_sender)
-            await log_activity(user_id, "purchase_success", f"Stars: {purchase_data['stars']}, Hash: {tx_hash}")
-        else:
-            # Update status menjadi failed
-            await save_purchase(
-                user_id=user_id,
-                recipient_username=purchase_data['username'],
-                recipient_nickname=purchase_data['nickname'],
-                stars_amount=purchase_data['stars'],
-                price_ton=purchase_data['price'],
-                show_sender=show_sender,
-                status="failed",
-                error_message="Transaction failed"
-            )
-            
-            await event.edit(
-                "❌ **Pembelian Gagal**\n\n"
-                "Coba lagi nanti.",
-                buttons=[Button.inline("🔄 Coba Lagi", data="buy")],
-                parse_mode='markdown'
-            )
-            await log_activity(user_id, "purchase_failed", f"Stars: {purchase_data['stars']}")
-    
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        
-        # Update status menjadi error
-        await save_purchase(
-            user_id=user_id,
-            recipient_username=purchase_data['username'],
-            recipient_nickname=purchase_data['nickname'],
-            stars_amount=purchase_data['stars'],
-            price_ton=purchase_data['price'],
-            show_sender=show_sender,
-            status="error",
-            error_message=str(e)[:200]
-        )
-        
-        await event.edit(
-            f"❌ **Error:** {str(e)[:100]}",
-            buttons=[Button.inline("🔄 Coba Lagi", data="buy")],
-            parse_mode='markdown'
-        )
-        await log_activity(user_id, "purchase_error", str(e)[:100])
-    finally:
-        # Hapus pending purchase
-        await delete_pending_purchase(user_id)
-        
-        if user_id in user_states:
-            del user_states[user_id]
-        if user_id in user_data:
-            del user_data[user_id]
-
-
-async def cancel_purchase(event, user_id: int):
-    if user_id in user_states:
-        del user_states[user_id]
-    if user_id in user_data:
-        del user_data[user_id]
-    
-    # Hapus pending purchase
-    await delete_pending_purchase(user_id)
-    
-    await event.edit(
-        "❌ **Pembelian Dibatalkan**",
-        buttons=[Button.inline("🛒 Beli Stars", data="buy")],
-        parse_mode='markdown'
-    )
-    await log_activity(user_id, "purchase_cancelled", "User cancelled purchase")
-
-
-async def notify_admins(purchase_data: dict, tx_hash: str, show_sender: bool):
-    notif = (
-        "💰 **Pembelian Baru**\n\n"
-        f"**User:** @{purchase_data['username']}\n"
-        f"**Stars:** {format_number(purchase_data['stars'])}\n"
-        f"**Harga:** {purchase_data['price']:.2f} TON\n"
-        f"**Opsi:** {'👤 Tampil' if show_sender else '🎁 Gift'}\n"
-        f"**Tx Hash:** `{tx_hash}`"
-    )
-    
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, notif, parse_mode='markdown')
-        except Exception as e:
-            logger.error(f"Gagal notifikasi admin {admin_id}: {e}")
-
-
-# ===================== MAIN =====================
+# ===================== MAIN FUNCTION =====================
 
 async def main():
-    logger.info("Memulai Main Bot...")
+    """Main function dengan deteksi mode clone."""
+    # Cek apakah ini bot clone atau bot master
+    is_clone = os.getenv("IS_CLONE", "false").lower() == "true"
+    master_token = os.getenv("MASTER_BOT_TOKEN", "")
     
-    # Inisialisasi database
-    init_database()
-    
-    if not API_ID or not API_HASH or not BOT_TOKEN:
-        logger.error("❌ Konfigurasi Telegram tidak lengkap")
-        return
-    
-    logger.info(f"📊 COOKIES length: {len(COOKIES)}")
-    logger.info(f"📊 HASH length: {len(HASH)}")
-    logger.info(f"📊 WALLET_MNEMONIC length: {len(WALLET_MNEMONIC)}")
-    
-    logger.info("✅ Starting main bot...")
-    await bot.start(bot_token=BOT_TOKEN)
-    logger.info("✅ Main bot running")
-    await bot.run_until_disconnected()
+    if is_clone:
+        # Mode: Bot Clone
+        logger.info("Starting as CLONED BOT...")
+        
+        # Inisialisasi database
+        init_database()
+        
+        # Update status bot
+        await update_bot_status(BOT_TOKEN, 'running')
+        
+        logger.info(f"✅ Cloned bot running with token: {BOT_TOKEN[:20]}...")
+        
+        # Jalankan bot clone dengan handler yang sama
+        await bot.start(bot_token=BOT_TOKEN)
+        logger.info("✅ Cloned bot is running")
+        await bot.run_until_disconnected()
+        
+    else:
+        # Mode: Bot Master
+        logger.info("Starting as MASTER BOT...")
+        
+        # Inisialisasi database
+        init_database()
+        
+        if not API_ID or not API_HASH or not BOT_TOKEN:
+            logger.error("❌ Konfigurasi Telegram tidak lengkap")
+            return
+        
+        logger.info(f"📊 COOKIES length: {len(COOKIES)}")
+        logger.info(f"📊 HASH length: {len(HASH)}")
+        logger.info(f"📊 WALLET_MNEMONIC length: {len(WALLET_MNEMONIC)}")
+        
+        # Start bot master
+        logger.info("✅ Starting master bot...")
+        await bot.start(bot_token=BOT_TOKEN)
+        logger.info("✅ Master bot running")
+        
+        # Start all cloned bots that should be running
+        await start_all_cloned_bots()
+        
+        await bot.run_until_disconnected()
 
 
 if __name__ == '__main__':
@@ -852,5 +829,7 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("🛑 Bot dihentikan oleh user")
+        # Cleanup: stop all cloned bots
+        asyncio.run(stop_all_cloned_bots())
     except Exception as e:
         logger.error(f"❌ Error fatal: {e}")
