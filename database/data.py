@@ -2,8 +2,8 @@
 import sqlite3
 import logging
 from datetime import datetime
-import  pytz
 from typing import Dict, List, Optional, Any
+import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -123,10 +123,15 @@ def init_database():
             completed_at TIMESTAMP,
             created_at TIMESTAMP,
             updated_at TIMESTAMP,
+            waiting_msg_id INTEGER,
             bot_token TEXT,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )
     ''')
+    try:
+        cursor.execute('ALTER TABLE deposits ADD COLUMN waiting_msg_id INTEGER')
+    except sqlite3.OperationalError:
+        pass
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_balances (
@@ -165,6 +170,7 @@ async def create_deposit(
     payment_number: str = None,
     total_payment: int = None,
     expired_at: str = None,
+    waiting_msg_id: int = None,
     bot_token: str = None
 ) -> bool:
     """Create a new deposit record"""
@@ -175,11 +181,13 @@ async def create_deposit(
         cursor.execute('''
             INSERT INTO deposits (
                 user_id, order_id, amount, total_payment, payment_method,
-                payment_number, qr_string, status, expired_at, created_at, updated_at, bot_token
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                payment_number, qr_string, status, expired_at, created_at, 
+                updated_at, waiting_msg_id, bot_token
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             user_id, order_id, amount, total_payment, payment_method,
-            payment_number, qr_string, 'pending', expired_at, now, now, bot_token
+            payment_number, qr_string, 'pending', expired_at, now, now,
+            waiting_msg_id, bot_token
         ))
         conn.commit()
         conn.close()
@@ -189,13 +197,12 @@ async def create_deposit(
         logger.error(f"Error creating deposit: {e}")
         return False
 
-
 async def update_deposit_status(
     order_id: str,
     status: str,
     completed_at: str = None,
     payment_method: str = None,
-    bot_token: str = None  # Tambahkan parameter ini
+    bot_token: str = None
 ) -> bool:
     """Update deposit status when payment completed"""
     try:
@@ -221,7 +228,7 @@ async def update_deposit_status(
             deposit = cursor.fetchone()
             if deposit:
                 user_id, amount = deposit
-                # Perbaikan: gunakan bot_token yang diterima sebagai parameter
+                # Update balance
                 await add_user_balance(user_id, amount, bot_token)
         
         conn.close()
@@ -229,6 +236,21 @@ async def update_deposit_status(
     except Exception as e:
         logger.error(f"Error updating deposit status: {e}")
         return False
+
+def parse_pakasir_time(time_str: str) -> datetime:
+    """Parse Pakasir time format to datetime object"""
+    try:
+        # Format: 2026-03-27T07:25:08.608551003Z
+        # Hapus Z dan parse
+        time_str_clean = time_str.replace('Z', '+00:00')
+        dt = datetime.fromisoformat(time_str_clean)
+        # Konversi ke Jakarta timezone
+        return dt.astimezone(JAKARTA_TZ)
+    except:
+        try:
+            return datetime.fromisoformat(time_str)
+        except:
+            return get_jakarta_time()
 
 async def get_deposit(order_id: str) -> Optional[Dict]:
     """Get deposit by order_id"""
@@ -238,7 +260,7 @@ async def get_deposit(order_id: str) -> Optional[Dict]:
         cursor.execute('''
             SELECT id, user_id, order_id, amount, total_payment, payment_method,
                    payment_number, qr_string, status, expired_at, completed_at,
-                   created_at, updated_at, bot_token
+                   created_at, updated_at, waiting_msg_id, bot_token
             FROM deposits WHERE order_id=?
         ''', (order_id,))
         row = cursor.fetchone()
@@ -249,13 +271,12 @@ async def get_deposit(order_id: str) -> Optional[Dict]:
                 'total_payment': row[4], 'payment_method': row[5], 'payment_number': row[6],
                 'qr_string': row[7], 'status': row[8], 'expired_at': row[9],
                 'completed_at': row[10], 'created_at': row[11], 'updated_at': row[12],
-                'bot_token': row[13]
+                'waiting_msg_id': row[13], 'bot_token': row[14]
             }
         return None
     except Exception as e:
         logger.error(f"Error getting deposit: {e}")
         return None
-
 
 async def get_user_deposits(user_id: int, bot_token: str = None, limit: int = 20) -> List[Dict]:
     """Get user's deposit history"""
