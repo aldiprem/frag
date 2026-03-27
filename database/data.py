@@ -112,14 +112,14 @@ def init_database():
     logger.info("✅ Database initialized successfully")
 
 
-async def save_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None, bot_token: str = None, admin_ids: list = None):
+async def save_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None, bot_token: str = None):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         existing = cursor.fetchone()
         now = datetime.now().isoformat()
-        is_admin = 1 if admin_ids and user_id in admin_ids else 0
+        is_admin = 1 if user_id in ADMIN_IDS else 0
         
         if existing:
             cursor.execute('''UPDATE users SET username=?, first_name=?, last_name=?, last_seen=?, is_admin=? WHERE user_id=?''',
@@ -134,13 +134,13 @@ async def save_user(user_id: int, username: str = None, first_name: str = None, 
         logger.error(f"Error saving user: {e}")
 
 
-async def log_activity(user_id: int, action: str, details: str = None, ip: str = None, bot_token: str = None, default_token: str = None):
+async def log_activity(user_id: int, action: str, details: str = None, ip: str = None, bot_token: str = None):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''INSERT INTO activity_log (user_id, action, details, ip_address, timestamp, bot_token)
                        VALUES (?, ?, ?, ?, ?, ?)''',
-                      (user_id, action, details, ip, datetime.now().isoformat(), bot_token or default_token))
+                      (user_id, action, details, ip, datetime.now().isoformat(), bot_token or BOT_TOKEN))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -149,7 +149,7 @@ async def log_activity(user_id: int, action: str, details: str = None, ip: str =
 
 async def save_purchase(user_id: int, recipient_username: str, recipient_nickname: str, stars_amount: int, 
                         price_idr: float, price_ton: float, tx_hash: str = None, show_sender: bool = True, 
-                        status: str = "pending", error_message: str = None, bot_token: str = None, default_token: str = None):
+                        status: str = "pending", error_message: str = None, bot_token: str = None):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -157,10 +157,10 @@ async def save_purchase(user_id: int, recipient_username: str, recipient_nicknam
                        price_idr, price_ton, tx_hash, show_sender, status, error_message, timestamp, bot_token)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                       (user_id, recipient_username, recipient_nickname, stars_amount, price_idr, price_ton,
-                       tx_hash, show_sender, status, error_message, datetime.now().isoformat(), bot_token or default_token))
+                       tx_hash, show_sender, status, error_message, datetime.now().isoformat(), bot_token or BOT_TOKEN))
         conn.commit()
         conn.close()
-        await log_activity(user_id, "purchase", f"Stars: {stars_amount}, Recipient: @{recipient_username}, Status: {status}", bot_token=bot_token, default_token=default_token)
+        await log_activity(user_id, "purchase", f"Stars: {stars_amount}, Recipient: @{recipient_username}, Status: {status}", bot_token=bot_token)
     except Exception as e:
         logger.error(f"Error saving purchase: {e}")
 
@@ -371,3 +371,8 @@ def add_bot_log_sync(bot_token: str, log_level: str, message: str):
         conn.close()
     except Exception as e:
         logger.error(f"Error adding bot log sync: {e}")
+
+
+# Variable yang dibutuhkan untuk fungsi database
+ADMIN_IDS = [7998861975]
+BOT_TOKEN = "8609719835:AAEOhr8L4eKIcRfB-Db0BIMMMCasQtVMWPw"
