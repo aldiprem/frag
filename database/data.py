@@ -141,6 +141,20 @@ def init_database():
     conn.close()
     logger.info("✅ Database initialized successfully")
 
+JAKARTA_TZ = pytz.timezone('Asia/Jakarta')
+
+def get_jakarta_time():
+    """Get current datetime in Asia/Jakarta timezone"""
+    return datetime.now(JAKARTA_TZ)
+
+def get_jakarta_time_iso():
+    """Get current datetime in ISO format with Asia/Jakarta timezone"""
+    return datetime.now(JAKARTA_TZ).isoformat()
+
+def get_jakarta_date():
+    """Get current date in Asia/Jakarta timezone"""
+    return datetime.now(JAKARTA_TZ).date().isoformat()
+
 async def create_deposit(
     user_id: int,
     order_id: str,
@@ -156,7 +170,7 @@ async def create_deposit(
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        now = datetime.now().isoformat()
+        now = get_jakarta_time_iso()
         cursor.execute('''
             INSERT INTO deposits (
                 user_id, order_id, amount, total_payment, payment_method,
@@ -186,7 +200,7 @@ async def update_deposit_status(
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        now = datetime.now().isoformat()
+        now = get_jakarta_time_iso()
         
         if status == 'completed':
             cursor.execute('''
@@ -298,7 +312,7 @@ async def add_user_balance(user_id: int, amount: int, bot_token: str = None) -> 
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        now = datetime.now().isoformat()
+        now = get_jakarta_time_iso()
         
         # Check if exists
         if bot_token:
@@ -354,7 +368,7 @@ async def deduct_user_balance(user_id: int, amount: int, bot_token: str = None) 
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        now = datetime.now().isoformat()
+        now = get_jakarta_time_iso()
         new_balance = current - amount
         
         if bot_token:
@@ -382,7 +396,7 @@ async def save_user(user_id: int, username: str = None, first_name: str = None, 
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         existing = cursor.fetchone()
-        now = datetime.now().isoformat()
+        now = get_jakarta_time_iso()
         is_admin = 1 if admin_ids and user_id in admin_ids else 0
         
         if existing:
@@ -440,7 +454,7 @@ async def get_user_stats(user_id: int, bot_token: str = None) -> Dict:
             cursor.execute('''SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), COALESCE(SUM(price_idr), 0)
                            FROM purchases WHERE user_id = ? AND status = 'success' ''', (user_id,))
         total_purchases, total_stars, total_spent_idr = cursor.fetchone()
-        today = datetime.now().date().isoformat()
+        today = get_jakarta_date()
         if bot_token:
             cursor.execute('''SELECT COUNT(*) FROM purchases WHERE user_id = ? AND status = 'success' 
                            AND DATE(timestamp) = ? AND bot_token = ?''', (user_id, today, bot_token))
@@ -534,7 +548,7 @@ async def update_bot_status(bot_token: str, status: str, pid: int = None):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        now = datetime.now().isoformat()
+        now = get_jakarta_time_iso()
         if status == 'running':
             cursor.execute('''UPDATE cloned_bots SET status=?, last_started=?, pid=? WHERE bot_token=?''',
                           (status, now, pid, bot_token))
@@ -616,7 +630,7 @@ async def get_bot_stats(bot_token: str) -> Dict:
         cursor.execute('SELECT COUNT(DISTINCT user_id) FROM purchases WHERE bot_token = ? AND status = "success"', (bot_token,))
         total_users = cursor.fetchone()[0]
         
-        today = datetime.now().date().isoformat()
+        today = get_jakarta_date()
         cursor.execute('''SELECT COUNT(*), COALESCE(SUM(stars_amount), 0)
                        FROM purchases WHERE bot_token = ? AND status = "success" AND DATE(timestamp) = ?''', 
                       (bot_token, today))
