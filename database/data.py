@@ -284,16 +284,14 @@ async def get_user_balance(user_id: int, bot_token: str = None) -> int:
                 WHERE user_id=? AND bot_token=?
             ''', (user_id, bot_token))
         else:
-            cursor.execute('''
-                SELECT balance FROM user_balances WHERE user_id=?
-            ''', (user_id,))
+            # Perbaiki baris ini juga
+            cursor.execute('SELECT balance FROM user_balances WHERE user_id=?', (user_id,))
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else 0
     except Exception as e:
         logger.error(f"Error getting user balance: {e}")
         return 0
-
 
 async def add_user_balance(user_id: int, amount: int, bot_token: str = None) -> bool:
     """Add balance to user"""
@@ -309,7 +307,8 @@ async def add_user_balance(user_id: int, amount: int, bot_token: str = None) -> 
                 WHERE user_id=? AND bot_token=?
             ''', (user_id, bot_token))
         else:
-            cursor.execute(''SELECT balance FROM user_balances WHERE user_id=?', (user_id,))
+            # Perbaiki baris ini - gunakan single quote
+            cursor.execute('SELECT balance FROM user_balances WHERE user_id=?', (user_id,))
         
         row = cursor.fetchone()
         
