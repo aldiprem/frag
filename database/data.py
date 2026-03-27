@@ -1,14 +1,14 @@
-# database/data.py - Database functions for Fragment Stars Bot
+# database/data.py - Database Functions for Fragment Stars Bot
 import sqlite3
 import logging
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Union
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
+# Database path
 DB_PATH = "frag.db"
 
-# ===================== DATABASE FUNCTIONS =====================
 
 def init_database():
     """Initialize SQLite3 database."""
@@ -112,14 +112,14 @@ def init_database():
     logger.info("✅ Database initialized successfully")
 
 
-async def save_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None, bot_token: str = None):
+async def save_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None, bot_token: str = None, admin_ids: list = None):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         existing = cursor.fetchone()
         now = datetime.now().isoformat()
-        is_admin = 1 if user_id in ADMIN_IDS else 0
+        is_admin = 1 if admin_ids and user_id in admin_ids else 0
         
         if existing:
             cursor.execute('''UPDATE users SET username=?, first_name=?, last_name=?, last_seen=?, is_admin=? WHERE user_id=?''',
@@ -140,7 +140,7 @@ async def log_activity(user_id: int, action: str, details: str = None, ip: str =
         cursor = conn.cursor()
         cursor.execute('''INSERT INTO activity_log (user_id, action, details, ip_address, timestamp, bot_token)
                        VALUES (?, ?, ?, ?, ?, ?)''',
-                      (user_id, action, details, ip, datetime.now().isoformat(), bot_token or BOT_TOKEN))
+                      (user_id, action, details, ip, datetime.now().isoformat(), bot_token))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -157,7 +157,7 @@ async def save_purchase(user_id: int, recipient_username: str, recipient_nicknam
                        price_idr, price_ton, tx_hash, show_sender, status, error_message, timestamp, bot_token)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                       (user_id, recipient_username, recipient_nickname, stars_amount, price_idr, price_ton,
-                       tx_hash, show_sender, status, error_message, datetime.now().isoformat(), bot_token or BOT_TOKEN))
+                       tx_hash, show_sender, status, error_message, datetime.now().isoformat(), bot_token))
         conn.commit()
         conn.close()
         await log_activity(user_id, "purchase", f"Stars: {stars_amount}, Recipient: @{recipient_username}, Status: {status}", bot_token=bot_token)
@@ -298,6 +298,20 @@ async def add_bot_log(bot_token: str, log_level: str, message: str):
         logger.error(f"Error adding bot log: {e}")
 
 
+def add_bot_log_sync(bot_token: str, log_level: str, message: str):
+    """Synchronous version of add_bot_log for use in threads"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''INSERT INTO bot_logs (bot_token, log_level, message, timestamp) 
+                       VALUES (?, ?, ?, ?)''',
+                       (bot_token, log_level, message[:500], datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error adding bot log sync: {e}")
+
+
 async def remove_cloned_bot(bot_token: str) -> bool:
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -358,21 +372,17 @@ async def get_bot_stats(bot_token: str) -> Dict:
         return {}
 
 
-# Fungsi synchronous untuk menambah log (untuk digunakan di thread)
-def add_bot_log_sync(bot_token: str, log_level: str, message: str):
-    """Synchronous version of add_bot_log for use in threads"""
+async def get_bot_logs(bot_username: str, limit: int = 20) -> List[tuple]:
+    """Get logs for a specific bot"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute('''INSERT INTO bot_logs (bot_token, log_level, message, timestamp) 
-                       VALUES (?, ?, ?, ?)''',
-                       (bot_token, log_level, message[:500], datetime.now().isoformat()))
-        conn.commit()
+        cursor.execute('''SELECT log_level, message, timestamp FROM bot_logs 
+                       WHERE bot_token IN (SELECT bot_token FROM cloned_bots WHERE bot_username = ?)
+                       ORDER BY timestamp DESC LIMIT ?''', (bot_username, limit))
+        logs = cursor.fetchall()
         conn.close()
+        return logs
     except Exception as e:
-        logger.error(f"Error adding bot log sync: {e}")
-
-
-# Variable yang dibutuhkan untuk fungsi database
-ADMIN_IDS = [7998861975]
-BOT_TOKEN = "8609719835:AAEOhr8L4eKIcRfB-Db0BIMMMCasQtVMWPw"
+        logger.error(f"Error getting bot logs: {e}")
+        return []
