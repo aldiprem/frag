@@ -106,11 +106,276 @@ def init_database():
             timestamp TIMESTAMP
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS deposits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            order_id TEXT UNIQUE NOT NULL,
+            amount INTEGER NOT NULL,
+            total_payment INTEGER,
+            payment_method TEXT,
+            payment_number TEXT,
+            status TEXT DEFAULT 'pending',
+            qr_string TEXT,
+            expired_at TIMESTAMP,
+            completed_at TIMESTAMP,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            bot_token TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_balances (
+            user_id INTEGER PRIMARY KEY,
+            balance INTEGER DEFAULT 0,
+            last_updated TIMESTAMP,
+            bot_token TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+    ''')
     
     conn.commit()
     conn.close()
     logger.info("✅ Database initialized successfully")
 
+async def create_deposit(
+    user_id: int,
+    order_id: str,
+    amount: int,
+    payment_method: str,
+    qr_string: str = None,
+    payment_number: str = None,
+    total_payment: int = None,
+    expired_at: str = None,
+    bot_token: str = None
+) -> bool:
+    """Create a new deposit record"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+        cursor.execute('''
+            INSERT INTO deposits (
+                user_id, order_id, amount, total_payment, payment_method,
+                payment_number, qr_string, status, expired_at, created_at, updated_at, bot_token
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user_id, order_id, amount, total_payment, payment_method,
+            payment_number, qr_string, 'pending', expired_at, now, now, bot_token
+        ))
+        conn.commit()
+        conn.close()
+        await log_activity(user_id, "deposit_created", f"Amount: {amount}, Order: {order_id}", bot_token=bot_token)
+        return True
+    except Exception as e:
+        logger.error(f"Error creating deposit: {e}")
+        return False
+
+
+async def update_deposit_status(
+    order_id: str,
+    status: str,
+    completed_at: str = None,
+    payment_method: str = None,
+    bot_token: str = None  # Tambahkan parameter ini
+) -> bool:
+    """Update deposit status when payment completed"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+        
+        if status == 'completed':
+            cursor.execute('''
+                UPDATE deposits SET status=?, completed_at=?, updated_at=?, payment_method=COALESCE(?, payment_method)
+                WHERE order_id=?
+            ''', (status, completed_at or now, now, payment_method, order_id))
+        else:
+            cursor.execute('''
+                UPDATE deposits SET status=?, updated_at=? WHERE order_id=?
+            ''', (status, now, order_id))
+        
+        conn.commit()
+        
+        # If completed, update user balance
+        if status == 'completed':
+            cursor.execute('SELECT user_id, amount FROM deposits WHERE order_id=?', (order_id,))
+            deposit = cursor.fetchone()
+            if deposit:
+                user_id, amount = deposit
+                # Perbaikan: gunakan bot_token yang diterima sebagai parameter
+                await add_user_balance(user_id, amount, bot_token)
+        
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating deposit status: {e}")
+        return False
+
+async def get_deposit(order_id: str) -> Optional[Dict]:
+    """Get deposit by order_id"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, user_id, order_id, amount, total_payment, payment_method,
+                   payment_number, qr_string, status, expired_at, completed_at,
+                   created_at, updated_at, bot_token
+            FROM deposits WHERE order_id=?
+        ''', (order_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {
+                'id': row[0], 'user_id': row[1], 'order_id': row[2], 'amount': row[3],
+                'total_payment': row[4], 'payment_method': row[5], 'payment_number': row[6],
+                'qr_string': row[7], 'status': row[8], 'expired_at': row[9],
+                'completed_at': row[10], 'created_at': row[11], 'updated_at': row[12],
+                'bot_token': row[13]
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Error getting deposit: {e}")
+        return None
+
+
+async def get_user_deposits(user_id: int, bot_token: str = None, limit: int = 20) -> List[Dict]:
+    """Get user's deposit history"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        if bot_token:
+            cursor.execute('''
+                SELECT order_id, amount, total_payment, payment_method, status,
+                       created_at, completed_at
+                FROM deposits WHERE user_id=? AND bot_token=?
+                ORDER BY created_at DESC LIMIT ?
+            ''', (user_id, bot_token, limit))
+        else:
+            cursor.execute('''
+                SELECT order_id, amount, total_payment, payment_method, status,
+                       created_at, completed_at
+                FROM deposits WHERE user_id=?
+                ORDER BY created_at DESC LIMIT ?
+            ''', (user_id, limit))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{
+            'order_id': r[0], 'amount': r[1], 'total_payment': r[2],
+            'payment_method': r[3], 'status': r[4], 'created_at': r[5],
+            'completed_at': r[6]
+        } for r in rows]
+    except Exception as e:
+        logger.error(f"Error getting user deposits: {e}")
+        return []
+
+
+async def get_user_balance(user_id: int, bot_token: str = None) -> int:
+    """Get user's current balance"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        if bot_token:
+            cursor.execute('''
+                SELECT balance FROM user_balances
+                WHERE user_id=? AND bot_token=?
+            ''', (user_id, bot_token))
+        else:
+            cursor.execute('''
+                SELECT balance FROM user_balances WHERE user_id=?
+            ''', (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except Exception as e:
+        logger.error(f"Error getting user balance: {e}")
+        return 0
+
+
+async def add_user_balance(user_id: int, amount: int, bot_token: str = None) -> bool:
+    """Add balance to user"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+        
+        # Check if exists
+        if bot_token:
+            cursor.execute('''
+                SELECT balance FROM user_balances
+                WHERE user_id=? AND bot_token=?
+            ''', (user_id, bot_token))
+        else:
+            cursor.execute(''SELECT balance FROM user_balances WHERE user_id=?', (user_id,))
+        
+        row = cursor.fetchone()
+        
+        if row:
+            new_balance = row[0] + amount
+            if bot_token:
+                cursor.execute('''
+                    UPDATE user_balances SET balance=?, last_updated=?
+                    WHERE user_id=? AND bot_token=?
+                ''', (new_balance, now, user_id, bot_token))
+            else:
+                cursor.execute('''
+                    UPDATE user_balances SET balance=?, last_updated=?
+                    WHERE user_id=?
+                ''', (new_balance, now, user_id))
+        else:
+            if bot_token:
+                cursor.execute('''
+                    INSERT INTO user_balances (user_id, balance, last_updated, bot_token)
+                    VALUES (?, ?, ?, ?)
+                ''', (user_id, amount, now, bot_token))
+            else:
+                cursor.execute('''
+                    INSERT INTO user_balances (user_id, balance, last_updated)
+                    VALUES (?, ?, ?)
+                ''', (user_id, amount, now))
+        
+        conn.commit()
+        conn.close()
+        await log_activity(user_id, "balance_added", f"Added {amount}, New balance: {new_balance if row else amount}", bot_token=bot_token)
+        return True
+    except Exception as e:
+        logger.error(f"Error adding user balance: {e}")
+        return False
+
+
+async def deduct_user_balance(user_id: int, amount: int, bot_token: str = None) -> bool:
+    """Deduct balance from user"""
+    try:
+        current = await get_user_balance(user_id, bot_token)
+        if current < amount:
+            return False
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+        new_balance = current - amount
+        
+        if bot_token:
+            cursor.execute('''
+                UPDATE user_balances SET balance=?, last_updated=?
+                WHERE user_id=? AND bot_token=?
+            ''', (new_balance, now, user_id, bot_token))
+        else:
+            cursor.execute('''
+                UPDATE user_balances SET balance=?, last_updated=?
+                WHERE user_id=?
+            ''', (new_balance, now, user_id))
+        
+        conn.commit()
+        conn.close()
+        await log_activity(user_id, "balance_deducted", f"Deducted {amount}, New balance: {new_balance}", bot_token=bot_token)
+        return True
+    except Exception as e:
+        logger.error(f"Error deducting user balance: {e}")
+        return False
 
 async def save_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None, bot_token: str = None, admin_ids: list = None):
     try:
