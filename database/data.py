@@ -2,8 +2,8 @@
 import sqlite3
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Any
 import  pytz
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -419,7 +419,7 @@ async def log_activity(user_id: int, action: str, details: str = None, ip: str =
         cursor = conn.cursor()
         cursor.execute('''INSERT INTO activity_log (user_id, action, details, ip_address, timestamp, bot_token)
                        VALUES (?, ?, ?, ?, ?, ?)''',
-                      (user_id, action, details, ip, datetime.now().isoformat(), bot_token))
+                      (user_id, action, details, ip, get_jakarta_time_iso(), bot_token))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -436,7 +436,7 @@ async def save_purchase(user_id: int, recipient_username: str, recipient_nicknam
                        price_idr, price_ton, tx_hash, show_sender, status, error_message, timestamp, bot_token)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                       (user_id, recipient_username, recipient_nickname, stars_amount, price_idr, price_ton,
-                       tx_hash, show_sender, status, error_message, datetime.now().isoformat(), bot_token))
+                       tx_hash, show_sender, status, error_message, get_jakarta_time_iso(), bot_token))
         conn.commit()
         conn.close()
         await log_activity(user_id, "purchase", f"Stars: {stars_amount}, Recipient: @{recipient_username}, Status: {status}", bot_token=bot_token)
@@ -477,7 +477,7 @@ async def get_all_stats(bot_token: str = None) -> Dict:
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM users')
         total_users = cursor.fetchone()[0]
-        today = datetime.now().date().isoformat()
+        today = get_jakarta_date()
         
         if bot_token:
             cursor.execute('''SELECT COUNT(DISTINCT user_id) FROM activity_log 
@@ -516,7 +516,7 @@ async def add_cloned_bot(bot_token: str, bot_username: str, bot_name: str, creat
         cursor = conn.cursor()
         cursor.execute('''INSERT OR REPLACE INTO cloned_bots (bot_token, bot_username, bot_name, status, created_by, created_at)
                        VALUES (?, ?, ?, 'stopped', ?, ?)''',
-                      (bot_token, bot_username, bot_name, created_by, datetime.now().isoformat()))
+                      (bot_token, bot_username, bot_name, created_by, get_jakarta_time_iso()))
         conn.commit()
         conn.close()
         logger.info(f"✅ Bot clone {bot_username} added")
@@ -570,7 +570,7 @@ async def add_bot_log(bot_token: str, log_level: str, message: str):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''INSERT INTO bot_logs (bot_token, log_level, message, timestamp) VALUES (?, ?, ?, ?)''',
-                      (bot_token, log_level, message, datetime.now().isoformat()))
+                      (bot_token, log_level, message, get_jakarta_time_iso()))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -584,7 +584,7 @@ def add_bot_log_sync(bot_token: str, log_level: str, message: str):
         cursor = conn.cursor()
         cursor.execute('''INSERT INTO bot_logs (bot_token, log_level, message, timestamp) 
                        VALUES (?, ?, ?, ?)''',
-                       (bot_token, log_level, message[:500], datetime.now().isoformat()))
+                       (bot_token, log_level, message[:500], get_jakarta_time_iso()))
         conn.commit()
         conn.close()
     except Exception as e:
