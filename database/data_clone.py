@@ -127,16 +127,17 @@ async def save_user(user_id: int, username: str = None, first_name: str = None,
         is_admin = 1 if admin_ids and user_id in admin_ids else 0
         
         if existing:
-            cursor.execute('''UPDATE users SET username=?, first_name=?, last_name=?, 
-                           last_seen=?, is_admin=? WHERE user_id=?''',
+            cursor.execute("""UPDATE users SET username=?, first_name=?, last_name=?, 
+                           last_seen=?, is_admin=? WHERE user_id=?""",
                           (username, first_name, last_name, now, is_admin, user_id))
         else:
-            cursor.execute('''INSERT INTO users (user_id, username, first_name, last_name, 
+            cursor.execute("""INSERT INTO users (user_id, username, first_name, last_name, 
                            is_admin, first_seen, last_seen)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
                           (user_id, username, first_name, last_name, is_admin, now, now))
         conn.commit()
         conn.close()
+        logger.info(f"User {user_id} saved successfully")
     except Exception as e:
         logger.error(f"Error saving user: {e}")
 
@@ -146,89 +147,58 @@ async def log_activity(user_id: int, action: str, details: str = None,
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute('''INSERT INTO activity_log (user_id, action, details, ip_address, 
-                       timestamp, bot_token) VALUES (?, ?, ?, ?, ?, ?)''',
+        cursor.execute("""INSERT INTO activity_log (user_id, action, details, ip_address, 
+                       timestamp, bot_token) VALUES (?, ?, ?, ?, ?, ?)""",
                       (user_id, action, details, ip, get_jakarta_time_iso(), bot_token))
         conn.commit()
         conn.close()
     except Exception as e:
         logger.error(f"Error logging activity: {e}")
 
-
 async def get_user_stats(user_id: int, bot_token: str = None) -> Dict:
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         if bot_token:
-            cursor.execute('''SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
                            COALESCE(SUM(price_idr), 0) FROM purchases 
-                           WHERE user_id = ? AND status = 'success' AND bot_token = ?''', 
+                           WHERE user_id = ? AND status = 'success' AND bot_token = ?""", 
                           (user_id, bot_token))
         else:
-            cursor.execute('''SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
                            COALESCE(SUM(price_idr), 0) FROM purchases 
-                           WHERE user_id = ? AND status = 'success' ''', (user_id,))
+                           WHERE user_id = ? AND status = 'success'""", (user_id,))
         total_purchases, total_stars, total_spent_idr = cursor.fetchone()
         today = get_jakarta_date()
         if bot_token:
-            cursor.execute('''SELECT COUNT(*) FROM purchases WHERE user_id = ? 
-                           AND status = 'success' AND DATE(timestamp) = ? AND bot_token = ?''', 
+            cursor.execute("""SELECT COUNT(*) FROM purchases WHERE user_id = ? 
+                           AND status = 'success' AND DATE(timestamp) = ? AND bot_token = ?""", 
                           (user_id, today, bot_token))
         else:
-            cursor.execute('''SELECT COUNT(*) FROM purchases WHERE user_id = ? 
-                           AND status = 'success' AND DATE(timestamp) = ?''', 
+            cursor.execute("""SELECT COUNT(*) FROM purchases WHERE user_id = ? 
+                           AND status = 'success' AND DATE(timestamp) = ?""", 
                           (user_id, today))
         today_purchases = cursor.fetchone()[0]
         conn.close()
-        return {'total_purchases': total_purchases or 0, 'total_stars': total_stars or 0,
-                'total_spent_idr': total_spent_idr or 0, 'today_purchases': today_purchases or 0}
+        
+        # Tambahkan get user info
+        cursor2 = conn.cursor()
+        cursor2.execute("SELECT username, first_name, last_name FROM users WHERE user_id = ?", (user_id,))
+        user_row = cursor2.fetchone()
+        conn.close()
+        
+        return {
+            'total_purchases': total_purchases or 0, 
+            'total_stars': total_stars or 0,
+            'total_spent_idr': total_spent_idr or 0, 
+            'today_purchases': today_purchases or 0,
+            'username': user_row[0] if user_row else None,
+            'first_name': user_row[1] if user_row else None,
+            'last_name': user_row[2] if user_row else None
+        }
     except Exception as e:
         logger.error(f"Error getting user stats: {e}")
         return {'total_purchases': 0, 'total_stars': 0, 'total_spent_idr': 0, 'today_purchases': 0}
-
-async def get_all_stats(bot_token: str = None) -> Dict:
-    """Get all statistics for cloned bot"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM users')
-        total_users = cursor.fetchone()[0]
-        today = get_jakarta_date()
-        
-        if bot_token:
-            cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM activity_log 
-                           WHERE DATE(timestamp) = ? AND action != 'system' AND bot_token = ?""", 
-                          (today, bot_token))
-            active_today = cursor.fetchone()[0]
-            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
-                           COALESCE(SUM(price_idr), 0) FROM purchases 
-                           WHERE status = 'success' AND bot_token = ?""", (bot_token,))
-            total_purchases, total_stars, total_volume_idr = cursor.fetchone()
-            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
-                           COALESCE(SUM(price_idr), 0) FROM purchases 
-                           WHERE status = 'success' AND DATE(timestamp) = ? AND bot_token = ?""", 
-                          (today, bot_token))
-            today_purchases, today_stars, today_volume_idr = cursor.fetchone()
-        else:
-            cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM activity_log 
-                           WHERE DATE(timestamp) = ? AND action != 'system'""", (today,))
-            active_today = cursor.fetchone()[0]
-            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
-                           COALESCE(SUM(price_idr), 0) FROM purchases WHERE status = 'success'""")
-            total_purchases, total_stars, total_volume_idr = cursor.fetchone()
-            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
-                           COALESCE(SUM(price_idr), 0) FROM purchases 
-                           WHERE status = 'success' AND DATE(timestamp) = ?""", (today,))
-            today_purchases, today_stars, today_volume_idr = cursor.fetchone()
-        
-        conn.close()
-        return {'total_users': total_users or 0, 'active_today': active_today or 0,
-                'total_purchases': total_purchases or 0, 'total_stars': total_stars or 0,
-                'total_volume_idr': total_volume_idr or 0, 'today_purchases': today_purchases or 0,
-                'today_stars': today_stars or 0, 'today_volume_idr': today_volume_idr or 0}
-    except Exception as e:
-        logger.error(f"Error getting all stats: {e}")
-        return {}
 
 # ===================== DEPOSIT FUNCTIONS =====================
 
@@ -280,31 +250,34 @@ async def update_deposit_status(
         cursor = conn.cursor()
         now = get_jakarta_time_iso()
         
+        # Ambil user_id dan amount sebelum update
+        cursor.execute('SELECT user_id, amount FROM deposits WHERE order_id=?', (order_id,))
+        deposit_data = cursor.fetchone()
+        
         if status == 'completed':
-            cursor.execute('''
+            cursor.execute("""
                 UPDATE deposits SET status=?, completed_at=?, updated_at=?, 
                 payment_method=COALESCE(?, payment_method) WHERE order_id=?
-            ''', (status, completed_at or now, now, payment_method, order_id))
+            """, (status, completed_at or now, now, payment_method, order_id))
         else:
-            cursor.execute('''
+            cursor.execute("""
                 UPDATE deposits SET status=?, updated_at=? WHERE order_id=?
-            ''', (status, now, order_id))
+            """, (status, now, order_id))
         
         conn.commit()
         
-        if status == 'completed':
-            cursor.execute('SELECT user_id, amount FROM deposits WHERE order_id=?', (order_id,))
-            deposit = cursor.fetchone()
-            if deposit:
-                user_id, amount = deposit
-                await add_user_balance(user_id, amount, bot_token)
+        # If completed, update user balance
+        if status == 'completed' and deposit_data:
+            user_id, amount = deposit_data
+            logger.info(f"Updating balance for user {user_id} with amount {amount}")
+            success = await add_user_balance(user_id, amount, bot_token)
+            logger.info(f"Balance update result: {success}")
         
         conn.close()
         return True
     except Exception as e:
         logger.error(f"Error updating deposit status: {e}")
         return False
-
 
 async def get_deposit(order_id: str) -> Optional[Dict]:
     try:
@@ -369,19 +342,64 @@ async def get_user_balance(user_id: int, bot_token: str = None) -> int:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         if bot_token:
-            cursor.execute('''
+            cursor.execute("""
                 SELECT balance FROM user_balances
                 WHERE user_id=? AND bot_token=?
-            ''', (user_id, bot_token))
+            """, (user_id, bot_token))
         else:
-            cursor.execute('SELECT balance FROM user_balances WHERE user_id=?', (user_id,))
+            cursor.execute("SELECT balance FROM user_balances WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
         conn.close()
-        return row[0] if row else 0
+        balance = row[0] if row else 0
+        logger.info(f"Balance for user {user_id}: {balance}")
+        return balance
     except Exception as e:
         logger.error(f"Error getting user balance: {e}")
         return 0
 
+async def get_all_stats(bot_token: str = None) -> Dict:
+    """Get all statistics for cloned bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total_users = cursor.fetchone()[0]
+        today = get_jakarta_date()
+        
+        if bot_token:
+            cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM activity_log 
+                           WHERE DATE(timestamp) = ? AND action != 'system' AND bot_token = ?""", 
+                          (today, bot_token))
+            active_today = cursor.fetchone()[0]
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+                           COALESCE(SUM(price_idr), 0) FROM purchases 
+                           WHERE status = 'success' AND bot_token = ?""", (bot_token,))
+            total_purchases, total_stars, total_volume_idr = cursor.fetchone()
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+                           COALESCE(SUM(price_idr), 0) FROM purchases 
+                           WHERE status = 'success' AND DATE(timestamp) = ? AND bot_token = ?""", 
+                          (today, bot_token))
+            today_purchases, today_stars, today_volume_idr = cursor.fetchone()
+        else:
+            cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM activity_log 
+                           WHERE DATE(timestamp) = ? AND action != 'system'""", (today,))
+            active_today = cursor.fetchone()[0]
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+                           COALESCE(SUM(price_idr), 0) FROM purchases WHERE status = 'success'""")
+            total_purchases, total_stars, total_volume_idr = cursor.fetchone()
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+                           COALESCE(SUM(price_idr), 0) FROM purchases 
+                           WHERE status = 'success' AND DATE(timestamp) = ?""", (today,))
+            today_purchases, today_stars, today_volume_idr = cursor.fetchone()
+        
+        conn.close()
+        return {'total_users': total_users or 0, 'active_today': active_today or 0,
+                'total_purchases': total_purchases or 0, 'total_stars': total_stars or 0,
+                'total_volume_idr': total_volume_idr or 0, 'today_purchases': today_purchases or 0,
+                'today_stars': today_stars or 0, 'today_volume_idr': today_volume_idr or 0}
+    except Exception as e:
+        logger.error(f"Error getting all stats: {e}")
+        return {}
 
 async def add_user_balance(user_id: int, amount: int, bot_token: str = None) -> bool:
     try:
@@ -389,49 +407,58 @@ async def add_user_balance(user_id: int, amount: int, bot_token: str = None) -> 
         cursor = conn.cursor()
         now = get_jakarta_time_iso()
         
+        logger.info(f"Adding balance: user={user_id}, amount={amount}, bot_token={bot_token}")
+        
+        # Check if exists
         if bot_token:
-            cursor.execute('''
+            cursor.execute("""
                 SELECT balance FROM user_balances
                 WHERE user_id=? AND bot_token=?
-            ''', (user_id, bot_token))
+            """, (user_id, bot_token))
         else:
-            cursor.execute('SELECT balance FROM user_balances WHERE user_id=?', (user_id,))
+            cursor.execute("SELECT balance FROM user_balances WHERE user_id=?", (user_id,))
         
         row = cursor.fetchone()
         
         if row:
             new_balance = row[0] + amount
             if bot_token:
-                cursor.execute('''
+                cursor.execute("""
                     UPDATE user_balances SET balance=?, last_updated=?
                     WHERE user_id=? AND bot_token=?
-                ''', (new_balance, now, user_id, bot_token))
+                """, (new_balance, now, user_id, bot_token))
             else:
-                cursor.execute('''
+                cursor.execute("""
                     UPDATE user_balances SET balance=?, last_updated=?
                     WHERE user_id=?
-                ''', (new_balance, now, user_id))
+                """, (new_balance, now, user_id))
+            logger.info(f"Updated balance: {row[0]} -> {new_balance}")
         else:
             if bot_token:
-                cursor.execute('''
+                cursor.execute("""
                     INSERT INTO user_balances (user_id, balance, last_updated, bot_token)
                     VALUES (?, ?, ?, ?)
-                ''', (user_id, amount, now, bot_token))
+                """, (user_id, amount, now, bot_token))
             else:
-                cursor.execute('''
+                cursor.execute("""
                     INSERT INTO user_balances (user_id, balance, last_updated)
                     VALUES (?, ?, ?)
-                ''', (user_id, amount, now))
+                """, (user_id, amount, now))
+            logger.info(f"Created new balance entry with {amount}")
         
         conn.commit()
         conn.close()
+        
+        # Verify the update
+        new_balance_check = await get_user_balance(user_id, bot_token)
+        logger.info(f"Verified balance after update: {new_balance_check}")
+        
         await log_activity(user_id, "balance_added", f"Added {amount}, New balance: {new_balance if row else amount}", 
                           bot_token=bot_token)
         return True
     except Exception as e:
         logger.error(f"Error adding user balance: {e}")
         return False
-
 
 async def deduct_user_balance(user_id: int, amount: int, bot_token: str = None) -> bool:
     try:
