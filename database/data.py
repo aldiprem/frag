@@ -189,6 +189,56 @@ def get_jakarta_time_iso():
 def get_jakarta_date():
     return datetime.now(JAKARTA_TZ).date().isoformat()
 
+# database/data.py - Tambahkan fungsi ini
+async def get_bot_id_by_token(bot_token: str) -> Optional[int]:
+    """Get bot ID from bot token"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM cloned_bots WHERE bot_token = ?", (bot_token,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error(f"Error getting bot id: {e}")
+        return None
+
+
+async def get_bot_token_by_id(bot_id: int) -> Optional[str]:
+    """Get bot token from bot ID"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT bot_token FROM cloned_bots WHERE id = ?", (bot_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error(f"Error getting bot token: {e}")
+        return None
+
+
+async def get_bot_detail_by_id(bot_id: int) -> Optional[Dict]:
+    """Get bot detail by ID"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""SELECT id, bot_token, bot_username, bot_name, status, created_by, 
+                       created_at, last_started, last_stopped, pid FROM cloned_bots 
+                       WHERE id = ?""", (bot_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {
+                'id': row[0], 'bot_token': row[1], 'bot_username': row[2], 'bot_name': row[3],
+                'status': row[4], 'created_by': row[5], 'created_at': row[6],
+                'last_started': row[7], 'last_stopped': row[8], 'pid': row[9]
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Error getting bot detail: {e}")
+        return None
+
 # ===================== BOT PRICE CONFIG FUNCTIONS =====================
 
 async def get_bot_price_config(bot_token: str) -> Dict:
