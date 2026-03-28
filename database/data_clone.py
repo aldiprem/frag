@@ -115,6 +115,7 @@ def get_jakarta_date():
 
 # ===================== USER FUNCTIONS =====================
 
+# database/data_clone.py - Pastikan conn.close() dipanggil
 async def save_user(user_id: int, username: str = None, first_name: str = None, 
                     last_name: str = None, bot_token: str = None, admin_ids: list = None):
     try:
@@ -135,10 +136,10 @@ async def save_user(user_id: int, username: str = None, first_name: str = None,
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
                           (user_id, username, first_name, last_name, is_admin, now, now))
         conn.commit()
+        conn.close()
         logger.info(f"User {user_id} saved successfully")
     except Exception as e:
         logger.error(f"Error saving user: {e}")
-
 
 async def log_activity(user_id: int, action: str, details: str = None, 
                        ip: str = None, bot_token: str = None):
@@ -152,10 +153,13 @@ async def log_activity(user_id: int, action: str, details: str = None,
     except Exception as e:
         logger.error(f"Error logging activity: {e}")
 
+# database/data_clone.py - Perbaiki get_user_stats
 async def get_user_stats(user_id: int, bot_token: str = None) -> Dict:
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
+        # Get purchase stats
         if bot_token:
             cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
                            COALESCE(SUM(price_idr), 0) FROM purchases 
@@ -166,6 +170,7 @@ async def get_user_stats(user_id: int, bot_token: str = None) -> Dict:
                            COALESCE(SUM(price_idr), 0) FROM purchases 
                            WHERE user_id = ? AND status = 'success'""", (user_id,))
         total_purchases, total_stars, total_spent_idr = cursor.fetchone()
+        
         today = get_jakarta_date()
         if bot_token:
             cursor.execute("""SELECT COUNT(*) FROM purchases WHERE user_id = ? 
@@ -177,10 +182,11 @@ async def get_user_stats(user_id: int, bot_token: str = None) -> Dict:
                           (user_id, today))
         today_purchases = cursor.fetchone()[0]
         
-        # Tambahkan get user info
-        cursor2 = conn.cursor()
-        cursor2.execute("SELECT username, first_name, last_name FROM users WHERE user_id = ?", (user_id,))
-        user_row = cursor2.fetchone()
+        # Get user info
+        cursor.execute("SELECT username, first_name, last_name FROM users WHERE user_id = ?", (user_id,))
+        user_row = cursor.fetchone()
+        
+        conn.close()
         
         return {
             'total_purchases': total_purchases or 0, 
