@@ -712,11 +712,10 @@ class AaycoBot:
                 entities[i] = MessageEntityTextUrl(e.offset, e.length, f'pre:{e.language}')
         return markdown.unparse(text, entities)
 
-client.parse_mode = AaycoBot()
-
 async def setup_cloned_bot_handlers(bot_client):
     global client
     client = bot_client
+    client.parse_mode = AaycoBot()
 
     @bot_client.on(events.NewMessage(pattern='^/deposit(?:\\s+(\\d+))?$'))
     async def deposit_command(event):
