@@ -38,7 +38,7 @@ from database.data_clone import (
     init_database, save_user, log_activity, save_purchase, get_user_stats,
     create_deposit, update_deposit_status, get_deposit, get_user_deposits,
     get_user_balance, add_user_balance, deduct_user_balance,
-    get_jakarta_time, get_jakarta_time_iso, get_jakarta_date, get_all_stats
+    get_jakarta_time, get_jakarta_time_iso, get_jakarta_date
 )
 
 # Import tonutils
@@ -924,13 +924,41 @@ __Untuk melanjutkan pembelian, sialkan kirim username akun tujuan yang akan mene
             await cloned_process_stars(event, user_id, message)
 
 # ===================== CLONED BOT ADDITIONAL FUNCTIONS =====================
+# clone.py - Perbaiki cloned_admin_panel
 async def cloned_admin_panel(event, user_id):
     if not await is_admin(user_id):
         await event.answer("❌ Akses ditolak!", alert=True)
         return
     
-    # Ganti get_all_stats dengan get_user_stats atau data lain
-    user_stats = await get_user_stats(user_id, bot_token=BOT_TOKEN)
+    # Ambil statistik dari database
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Hitung total users untuk bot ini
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    
+    # Hitung active today
+    today = get_jakarta_date()
+    cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM activity_log 
+                   WHERE DATE(timestamp) = ? AND bot_token = ?""", 
+                  (today, BOT_TOKEN))
+    active_today = cursor.fetchone()[0] or 0
+    
+    # Hitung total purchases
+    cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+                   COALESCE(SUM(price_idr), 0) FROM purchases 
+                   WHERE bot_token = ? AND status = 'success'""", (BOT_TOKEN,))
+    total_purchases, total_stars, total_volume = cursor.fetchone()
+    
+    # Hitung purchases hari ini
+    cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0) FROM purchases 
+                   WHERE bot_token = ? AND status = 'success' AND DATE(timestamp) = ?""", 
+                  (BOT_TOKEN, today))
+    today_purchases, today_stars = cursor.fetchone()
+    
+    conn.close()
+    
     balance = await get_balance()
     balance_idr = balance * (PRICE_PER_STAR_IDR / PRICE_PER_STAR_TON / 1)
     
@@ -938,17 +966,18 @@ async def cloned_admin_panel(event, user_id):
 ⚙️ **ADMIN PANEL - CLONE BOT**
 
 📊 **STATISTIK BOT INI**
-• Total Users: {user_stats['total_users'] if 'total_users' in user_stats else '-'}
-• Active Today: {user_stats['active_today'] if 'active_today' in user_stats else '-'}
-• Total Purchases: {user_stats['total_purchases']}
-• Total Stars Sold: {format_number(user_stats['total_stars'])}
-• Total Volume: {format_idr(user_stats['total_spent_idr'])}
+• Total Users: {total_users}
+• Active Today: {active_today}
+• Total Purchases: {total_purchases or 0}
+• Total Stars Sold: {format_number(total_stars or 0)}
+• Total Volume: {format_idr(total_volume or 0)}
 
 💰 **WALLET**
 • Balance: {balance:.4f} TON (≈ {format_idr(balance_idr)})
 
 📈 **TODAY**
-• Purchases: {user_stats['today_purchases']}
+• Purchases: {today_purchases or 0}
+• Stars: {format_number(today_stars or 0)}
 
 💡 **Harga per star:** {format_idr(PRICE_PER_STAR_IDR)}
     """
