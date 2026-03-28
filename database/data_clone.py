@@ -95,7 +95,6 @@ def init_database():
     ''')
     
     conn.commit()
-    conn.close()
     logger.info("✅ Database initialized successfully")
 
 
@@ -136,7 +135,6 @@ async def save_user(user_id: int, username: str = None, first_name: str = None,
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
                           (user_id, username, first_name, last_name, is_admin, now, now))
         conn.commit()
-        conn.close()
         logger.info(f"User {user_id} saved successfully")
     except Exception as e:
         logger.error(f"Error saving user: {e}")
@@ -151,7 +149,6 @@ async def log_activity(user_id: int, action: str, details: str = None,
                        timestamp, bot_token) VALUES (?, ?, ?, ?, ?, ?)""",
                       (user_id, action, details, ip, get_jakarta_time_iso(), bot_token))
         conn.commit()
-        conn.close()
     except Exception as e:
         logger.error(f"Error logging activity: {e}")
 
@@ -179,13 +176,11 @@ async def get_user_stats(user_id: int, bot_token: str = None) -> Dict:
                            AND status = 'success' AND DATE(timestamp) = ?""", 
                           (user_id, today))
         today_purchases = cursor.fetchone()[0]
-        conn.close()
         
         # Tambahkan get user info
         cursor2 = conn.cursor()
         cursor2.execute("SELECT username, first_name, last_name FROM users WHERE user_id = ?", (user_id,))
         user_row = cursor2.fetchone()
-        conn.close()
         
         return {
             'total_purchases': total_purchases or 0, 
@@ -230,7 +225,6 @@ async def create_deposit(
             waiting_msg_id, bot_token
         ))
         conn.commit()
-        conn.close()
         await log_activity(user_id, "deposit_created", f"Amount: {amount}, Order: {order_id}", bot_token=bot_token)
         return True
     except Exception as e:
@@ -273,7 +267,6 @@ async def update_deposit_status(
             success = await add_user_balance(user_id, amount, bot_token)
             logger.info(f"Balance update result: {success}")
         
-        conn.close()
         return True
     except Exception as e:
         logger.error(f"Error updating deposit status: {e}")
@@ -290,7 +283,7 @@ async def get_deposit(order_id: str) -> Optional[Dict]:
             FROM deposits WHERE order_id=?
         ''', (order_id,))
         row = cursor.fetchone()
-        conn.close()
+
         if row:
             return {
                 'id': row[0], 'user_id': row[1], 'order_id': row[2], 'amount': row[3],
@@ -324,7 +317,7 @@ async def get_user_deposits(user_id: int, bot_token: str = None, limit: int = 20
                 ORDER BY created_at DESC LIMIT ?
             ''', (user_id, limit))
         rows = cursor.fetchall()
-        conn.close()
+
         return [{
             'order_id': r[0], 'amount': r[1], 'total_payment': r[2],
             'payment_method': r[3], 'status': r[4], 'created_at': r[5],
@@ -349,7 +342,7 @@ async def get_user_balance(user_id: int, bot_token: str = None) -> int:
         else:
             cursor.execute("SELECT balance FROM user_balances WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
-        conn.close()
+
         balance = row[0] if row else 0
         logger.info(f"Balance for user {user_id}: {balance}")
         return balance
@@ -392,7 +385,6 @@ async def get_all_stats(bot_token: str = None) -> Dict:
                            WHERE status = 'success' AND DATE(timestamp) = ?""", (today,))
             today_purchases, today_stars, today_volume_idr = cursor.fetchone()
         
-        conn.close()
         return {'total_users': total_users or 0, 'active_today': active_today or 0,
                 'total_purchases': total_purchases or 0, 'total_stars': total_stars or 0,
                 'total_volume_idr': total_volume_idr or 0, 'today_purchases': today_purchases or 0,
@@ -447,7 +439,6 @@ async def add_user_balance(user_id: int, amount: int, bot_token: str = None) -> 
             logger.info(f"Created new balance entry with {amount}")
         
         conn.commit()
-        conn.close()
         
         # Verify the update
         new_balance_check = await get_user_balance(user_id, bot_token)
@@ -483,7 +474,6 @@ async def deduct_user_balance(user_id: int, amount: int, bot_token: str = None) 
             ''', (new_balance, now, user_id))
         
         conn.commit()
-        conn.close()
         await log_activity(user_id, "balance_deducted", f"Deducted {amount}, New balance: {new_balance}", 
                           bot_token=bot_token)
         return True
@@ -510,7 +500,6 @@ async def save_purchase(user_id: int, recipient_username: str, recipient_nicknam
                        price_idr, price_ton, tx_hash, show_sender, status, error_message, 
                        get_jakarta_time_iso(), bot_token))
         conn.commit()
-        conn.close()
         await log_activity(user_id, "purchase", 
                           f"Stars: {stars_amount}, Recipient: @{recipient_username}, Status: {status}", 
                           bot_token=bot_token)
