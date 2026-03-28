@@ -33,12 +33,10 @@ from urllib.parse import urlencode
 import pytz
 import sqlite3
 
-from database.data import (
+from database.data_clone import (
     init_database, save_user, log_activity, save_purchase, get_user_stats,
-    get_all_stats, update_bot_status,
-    add_bot_log, add_bot_log_sync,
     create_deposit, update_deposit_status, get_deposit, get_user_deposits,
-    get_user_balance, add_user_balance, deduct_user_balance, 
+    get_user_balance, add_user_balance, deduct_user_balance,
     get_jakarta_time, get_jakarta_time_iso, get_jakarta_date
 )
 
