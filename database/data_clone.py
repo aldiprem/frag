@@ -186,6 +186,49 @@ async def get_user_stats(user_id: int, bot_token: str = None) -> Dict:
         logger.error(f"Error getting user stats: {e}")
         return {'total_purchases': 0, 'total_stars': 0, 'total_spent_idr': 0, 'today_purchases': 0}
 
+async def get_all_stats(bot_token: str = None) -> Dict:
+    """Get all statistics for cloned bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total_users = cursor.fetchone()[0]
+        today = get_jakarta_date()
+        
+        if bot_token:
+            cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM activity_log 
+                           WHERE DATE(timestamp) = ? AND action != 'system' AND bot_token = ?""", 
+                          (today, bot_token))
+            active_today = cursor.fetchone()[0]
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+                           COALESCE(SUM(price_idr), 0) FROM purchases 
+                           WHERE status = 'success' AND bot_token = ?""", (bot_token,))
+            total_purchases, total_stars, total_volume_idr = cursor.fetchone()
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+                           COALESCE(SUM(price_idr), 0) FROM purchases 
+                           WHERE status = 'success' AND DATE(timestamp) = ? AND bot_token = ?""", 
+                          (today, bot_token))
+            today_purchases, today_stars, today_volume_idr = cursor.fetchone()
+        else:
+            cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM activity_log 
+                           WHERE DATE(timestamp) = ? AND action != 'system'""", (today,))
+            active_today = cursor.fetchone()[0]
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+                           COALESCE(SUM(price_idr), 0) FROM purchases WHERE status = 'success'""")
+            total_purchases, total_stars, total_volume_idr = cursor.fetchone()
+            cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
+                           COALESCE(SUM(price_idr), 0) FROM purchases 
+                           WHERE status = 'success' AND DATE(timestamp) = ?""", (today,))
+            today_purchases, today_stars, today_volume_idr = cursor.fetchone()
+        
+        conn.close()
+        return {'total_users': total_users or 0, 'active_today': active_today or 0,
+                'total_purchases': total_purchases or 0, 'total_stars': total_stars or 0,
+                'total_volume_idr': total_volume_idr or 0, 'today_purchases': today_purchases or 0,
+                'today_stars': today_stars or 0, 'today_volume_idr': today_volume_idr or 0}
+    except Exception as e:
+        logger.error(f"Error getting all stats: {e}")
+        return {}
 
 # ===================== DEPOSIT FUNCTIONS =====================
 
