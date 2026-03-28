@@ -398,24 +398,31 @@ async def get_bot_users_count(bot_token: str) -> int:
 
 
 async def get_bot_stats(bot_token: str) -> Dict:
+    """Get detailed stats for a specific bot"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
+        # Total users yang start/interact dengan bot ini (dari activity_log)
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM activity_log WHERE bot_token = ?", (bot_token,))
+        total_users = cursor.fetchone()[0] or 0
+        
+        # Total purchases
         cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0), 
                        COALESCE(SUM(price_idr), 0) FROM purchases 
                        WHERE bot_token = ? AND status = 'success'""", (bot_token,))
         total_purchases, total_stars, total_volume = cursor.fetchone()
         
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM purchases WHERE bot_token = ? AND status = 'success'", (bot_token,))
-        total_users = cursor.fetchone()[0]
-        
         today = get_jakarta_date()
+        
+        # Today's purchases
         cursor.execute("""SELECT COUNT(*), COALESCE(SUM(stars_amount), 0) FROM purchases 
                        WHERE bot_token = ? AND status = 'success' AND DATE(timestamp) = ?""", 
                       (bot_token, today))
         today_purchases, today_stars = cursor.fetchone()
         
         conn.close()
+        
         return {
             'total_purchases': total_purchases or 0,
             'total_stars': total_stars or 0,
@@ -427,7 +434,6 @@ async def get_bot_stats(bot_token: str) -> Dict:
     except Exception as e:
         logger.error(f"Error getting bot stats: {e}")
         return {}
-
 
 async def get_bot_logs(bot_username: str, limit: int = 20) -> List[tuple]:
     try:
