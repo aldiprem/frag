@@ -443,3 +443,26 @@ async def get_bot_logs(bot_username: str, limit: int = 20) -> List[tuple]:
     except Exception as e:
         logger.error(f"Error getting bot logs: {e}")
         return []
+    
+async def save_purchase(user_id: int, recipient_username: str, recipient_nickname: str, 
+                        stars_amount: int, price_idr: float, price_ton: float, 
+                        tx_hash: str = None, show_sender: bool = True, 
+                        status: str = "pending", error_message: str = None, 
+                        bot_token: str = None):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''INSERT INTO purchases (user_id, recipient_username, recipient_nickname, 
+                       stars_amount, price_idr, price_ton, tx_hash, show_sender, status, 
+                       error_message, timestamp, bot_token)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                      (user_id, recipient_username, recipient_nickname, stars_amount, 
+                       price_idr, price_ton, tx_hash, show_sender, status, error_message, 
+                       get_jakarta_time_iso(), bot_token))
+        conn.commit()
+        conn.close()
+        await log_activity(user_id, "purchase", 
+                          f"Stars: {stars_amount}, Recipient: @{recipient_username}, Status: {status}", 
+                          bot_token=bot_token)
+    except Exception as e:
+        logger.error(f"Error saving purchase: {e}")
