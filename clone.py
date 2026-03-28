@@ -38,7 +38,7 @@ from database.data_clone import (
     init_database, save_user, log_activity, save_purchase, get_user_stats,
     create_deposit, update_deposit_status, get_deposit, get_user_deposits,
     get_user_balance, add_user_balance, deduct_user_balance,
-    get_jakarta_time, get_jakarta_time_iso, get_jakarta_date
+    get_jakarta_time, get_jakarta_time_iso, get_jakarta_date, get_all_stats
 )
 
 # Import tonutils
@@ -753,11 +753,17 @@ async def setup_cloned_bot_handlers(bot_client):
     async def cloned_start_handler(event):
         user = await event.get_sender()
         user_id = user.id
-        username = user.username or ""
         first_name = user.first_name or ""
         last_name = user.last_name or ""
         fullname = f"{first_name} {last_name}".strip()
         mention = f"[{fullname}](tg://user?id={user_id})"
+
+        if user.username:
+            username = user.username
+        elif getattr(user, "usernames", None):
+            username = user.usernames[0].username
+        else:
+            username = None
 
         await save_user(user_id, username, first_name, last_name, bot_token=BOT_TOKEN, admin_ids=ADMIN_IDS)
         await log_activity(user_id, "start", "User started the bot", bot_token=BOT_TOKEN)
