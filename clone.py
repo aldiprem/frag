@@ -33,6 +33,7 @@ from urllib.parse import urlencode
 import pytz
 import sqlite3
 
+from database.data import get_all_stats
 from database.data_clone import (
     init_database, save_user, log_activity, save_purchase, get_user_stats,
     create_deposit, update_deposit_status, get_deposit, get_user_deposits,
@@ -917,13 +918,13 @@ __Untuk melanjutkan pembelian, sialkan kirim username akun tujuan yang akan mene
             await cloned_process_stars(event, user_id, message)
 
 # ===================== CLONED BOT ADDITIONAL FUNCTIONS =====================
-
 async def cloned_admin_panel(event, user_id):
     if not await is_admin(user_id):
         await event.answer("❌ Akses ditolak!", alert=True)
         return
     
-    stats = await get_all_stats(bot_token=BOT_TOKEN)
+    # Ganti get_all_stats dengan get_user_stats atau data lain
+    user_stats = await get_user_stats(user_id, bot_token=BOT_TOKEN)
     balance = await get_balance()
     balance_idr = balance * (PRICE_PER_STAR_IDR / PRICE_PER_STAR_TON / 1)
     
@@ -931,19 +932,17 @@ async def cloned_admin_panel(event, user_id):
 ⚙️ **ADMIN PANEL - CLONE BOT**
 
 📊 **STATISTIK BOT INI**
-• Total Users: {stats['total_users']}
-• Active Today: {stats['active_today']}
-• Total Purchases: {stats['total_purchases']}
-• Total Stars Sold: {format_number(stats['total_stars'])}
-• Total Volume: {format_idr(stats['total_volume_idr'])}
+• Total Users: {user_stats['total_users'] if 'total_users' in user_stats else '-'}
+• Active Today: {user_stats['active_today'] if 'active_today' in user_stats else '-'}
+• Total Purchases: {user_stats['total_purchases']}
+• Total Stars Sold: {format_number(user_stats['total_stars'])}
+• Total Volume: {format_idr(user_stats['total_spent_idr'])}
 
 💰 **WALLET**
 • Balance: {balance:.4f} TON (≈ {format_idr(balance_idr)})
 
 📈 **TODAY**
-• Purchases: {stats['today_purchases']}
-• Stars: {format_number(stats['today_stars'])}
-• Volume: {format_idr(stats['today_volume_idr'])}
+• Purchases: {user_stats['today_purchases']}
 
 💡 **Harga per star:** {format_idr(PRICE_PER_STAR_IDR)}
     """
@@ -1157,7 +1156,6 @@ async def main():
     global client
     logger.info("Starting as CLONED BOT...")
     init_database()
-    await update_bot_status(BOT_TOKEN, 'running')
     
     client = TelegramClient(f'clone_bot_{BOT_TOKEN}', API_ID, API_HASH)
     await setup_cloned_bot_handlers(client)
