@@ -33,7 +33,10 @@ from urllib.parse import urlencode
 import pytz
 import sqlite3
 
-from database.data import get_all_stats
+from database.data import (
+    get_all_stats, get_bot_price_config, get_price_templates, calculate_price
+)
+
 from database.data_clone import (
     init_database, save_user, log_activity, save_purchase, get_user_stats,
     create_deposit, update_deposit_status, get_deposit, get_user_deposits,
@@ -1020,8 +1023,12 @@ __Silakan klik tombol dibawah ini untuk melanjutkan tindakan pembelian anda di b
 async def cloned_ask_sender_option(event, user_id: int):
     data = get_user_data(user_id)
     
-    price_idr = calculate_price_idr(data['stars'])
-    price_ton = calculate_price_ton(data['stars'])
+    # Hitung harga menggunakan fungsi calculate_price
+    price_idr = await calculate_price(BOT_TOKEN, data['stars'])
+    price_ton = price_idr / (PRICE_PER_STAR_IDR / PRICE_PER_STAR_TON)
+    
+    set_user_data(user_id, 'price_idr', price_idr)
+    set_user_data(user_id, 'price_ton', price_ton)
     
     msg = f"""
 [✅](tg://emoji?id=4972316727007249049) **Persiapan pembelian telah tersimpan!**
