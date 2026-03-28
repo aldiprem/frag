@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import pytz
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,31 @@ def init_database():
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_price_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_token TEXT NOT NULL,
+            price_per_star REAL NOT NULL DEFAULT 270,
+            calculation_mode TEXT DEFAULT 'per_star',
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            FOREIGN KEY (bot_token) REFERENCES cloned_bots(bot_token)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_price_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_token TEXT NOT NULL,
+            stars_amount INTEGER NOT NULL,
+            price_idr REAL NOT NULL,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            FOREIGN KEY (bot_token) REFERENCES cloned_bots(bot_token),
+            UNIQUE(bot_token, stars_amount)
+        )
+    ''')
     
     try:
         cursor.execute('ALTER TABLE deposits ADD COLUMN waiting_msg_id INTEGER')
@@ -150,7 +176,7 @@ def init_database():
 
 
 JAKARTA_TZ = pytz.timezone('Asia/Jakarta')
-
+PRICE_PER_STAR_IDR = float(os.getenv("PRICE_PER_STAR_IDR", 270))
 
 def get_jakarta_time():
     return datetime.now(JAKARTA_TZ)
@@ -163,6 +189,166 @@ def get_jakarta_time_iso():
 def get_jakarta_date():
     return datetime.now(JAKARTA_TZ).date().isoformat()
 
+# ===================== BOT PRICE CONFIG FUNCTIONS =====================
+
+async def get_bot_price_config(bot_token: str) -> Dict:
+    """Get price configuration for a specific bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT price_per_star, calculation_mode, created_at, updated_at 
+            FROM bot_price_config WHERE bot_token = ?
+        """, (bot_token,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'price_per_star': row[0],
+                'calculation_mode': row[1],
+                'created_at': row[2],
+                'updated_at': row[3]
+            }
+        else:
+            return {
+                'price_per_star': PRICE_PER_STAR_IDR,
+                'calculation_mode': 'per_star',
+                'created_at': None,
+                'updated_at': None
+            }
+    except Exception as e:
+        logger.error(f"Error getting bot price config: {e}")
+        return {'price_per_star': PRICE_PER_STAR_IDR, 'calculation_mode': 'per_star'}
+
+
+async def update_bot_price_config(bot_token: str, price_per_star: float = None, 
+                                   calculation_mode: str = None) -> bool:
+    """Update price configuration for a specific bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        
+        cursor.execute("SELECT * FROM bot_price_config WHERE bot_token = ?", (bot_token,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            updates = []
+            params = []
+            if price_per_star is not None:
+                updates.append("price_per_star = ?")
+                params.append(price_per_star)
+            if calculation_mode is not None:
+                updates.append("calculation_mode = ?")
+                params.append(calculation_mode)
+            updates.append("updated_at = ?")
+            params.append(now)
+            params.append(bot_token)
+            
+            cursor.execute(f"UPDATE bot_price_config SET {', '.join(updates)} WHERE bot_token = ?", params)
+        else:
+            cursor.execute("""
+                INSERT INTO bot_price_config (bot_token, price_per_star, calculation_mode, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (bot_token, price_per_star or PRICE_PER_STAR_IDR, calculation_mode or 'per_star', now, now))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating bot price config: {e}")
+        return False
+
+
+async def add_price_template(bot_token: str, stars_amount: int, price_idr: float) -> bool:
+    """Add price template for specific stars amount"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        cursor.execute("""
+            INSERT OR REPLACE INTO bot_price_templates (bot_token, stars_amount, price_idr, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (bot_token, stars_amount, price_idr, now, now))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error adding price template: {e}")
+        return False
+
+
+async def delete_price_template(bot_token: str, stars_amount: int) -> bool:
+    """Delete price template for specific stars amount"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM bot_price_templates WHERE bot_token = ? AND stars_amount = ?", 
+                      (bot_token, stars_amount))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting price template: {e}")
+        return False
+
+
+async def get_price_templates(bot_token: str) -> List[Dict]:
+    """Get all price templates for a bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT stars_amount, price_idr, created_at, updated_at 
+            FROM bot_price_templates WHERE bot_token = ? ORDER BY stars_amount ASC
+        """, (bot_token,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'stars': r[0], 'price': r[1], 'created_at': r[2], 'updated_at': r[3]} for r in rows]
+    except Exception as e:
+        logger.error(f"Error getting price templates: {e}")
+        return []
+
+
+async def calculate_price(bot_token: str, stars: int) -> float:
+    """Calculate price based on bot config and templates"""
+    config = await get_bot_price_config(bot_token)
+    templates = await get_price_templates(bot_token)
+    
+    if config['calculation_mode'] == 'per_star':
+        return stars * config['price_per_star']
+    
+    elif config['calculation_mode'] == 'interpolation' and len(templates) >= 2:
+        sorted_templates = sorted(templates, key=lambda x: x['stars'])
+        
+        # Jika stars sama persis dengan template
+        for t in sorted_templates:
+            if t['stars'] == stars:
+                return t['price']
+        
+        # Cari interpolasi antara dua template
+        lower = None
+        upper = None
+        for t in sorted_templates:
+            if t['stars'] <= stars:
+                lower = t
+            if t['stars'] >= stars and upper is None:
+                upper = t
+        
+        if lower and upper:
+            ratio = (stars - lower['stars']) / (upper['stars'] - lower['stars'])
+            price = lower['price'] + (upper['price'] - lower['price']) * ratio
+            return round(price, 0)
+        elif lower:
+            return lower['price']
+        elif upper:
+            return upper['price']
+        else:
+            return stars * config['price_per_star']
+    
+    else:
+        return stars * config['price_per_star']
 
 # ===================== USER FUNCTIONS =====================
 
