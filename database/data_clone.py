@@ -93,6 +93,35 @@ def init_database():
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_bank_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_token TEXT NOT NULL,
+            bank_name TEXT,
+            account_number TEXT,
+            account_name TEXT,
+            is_active BOOLEAN DEFAULT 0,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            FOREIGN KEY (bot_token) REFERENCES cloned_bots(bot_token)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_qris (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_token TEXT NOT NULL,
+            qr_string TEXT,
+            qr_name TEXT,
+            qr_note TEXT,
+            fee REAL DEFAULT 0,
+            is_active BOOLEAN DEFAULT 0,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            FOREIGN KEY (bot_token) REFERENCES cloned_bots(bot_token)
+        )
+    ''')
     
     conn.commit()
     logger.info("✅ Database initialized successfully")
@@ -112,6 +141,249 @@ def get_jakarta_time_iso():
 def get_jakarta_date():
     return datetime.now(JAKARTA_TZ).date().isoformat()
 
+# ===================== BANK ACCOUNT FUNCTIONS =====================
+
+async def add_bank_account(bot_token: str, bank_name: str, account_number: str, account_name: str) -> bool:
+    """Add bank account for bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        cursor.execute("""
+            INSERT INTO bot_bank_accounts (bot_token, bank_name, account_number, account_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (bot_token, bank_name, account_number, account_name, now, now))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error adding bank account: {e}")
+        return False
+
+
+async def delete_bank_account(bot_token: str, account_id: int) -> bool:
+    """Delete bank account"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM bot_bank_accounts WHERE id = ? AND bot_token = ?", (account_id, bot_token))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting bank account: {e}")
+        return False
+
+
+async def get_bank_accounts(bot_token: str) -> List[Dict]:
+    """Get all bank accounts for bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, bank_name, account_number, account_name, is_active, created_at, updated_at
+            FROM bot_bank_accounts WHERE bot_token = ? ORDER BY id ASC
+        """, (bot_token,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{
+            'id': r[0], 'bank_name': r[1], 'account_number': r[2],
+            'account_name': r[3], 'is_active': r[4], 'created_at': r[5], 'updated_at': r[6]
+        } for r in rows]
+    except Exception as e:
+        logger.error(f"Error getting bank accounts: {e}")
+        return []
+
+
+async def set_active_bank_account(bot_token: str, account_id: int) -> bool:
+    """Set active bank account (deactivate others first)"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        # Deactivate all
+        cursor.execute("UPDATE bot_bank_accounts SET is_active = 0, updated_at = ? WHERE bot_token = ?", (now, bot_token))
+        # Activate selected
+        cursor.execute("UPDATE bot_bank_accounts SET is_active = 1, updated_at = ? WHERE id = ? AND bot_token = ?", 
+                      (now, account_id, bot_token))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error setting active bank account: {e}")
+        return False
+
+
+# ===================== QRIS FUNCTIONS =====================
+
+async def add_qris(bot_token: str, qr_string: str, qr_name: str = None) -> bool:
+    """Add QRIS for bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        cursor.execute("""
+            INSERT INTO bot_qris (bot_token, qr_string, qr_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (bot_token, qr_string, qr_name, now, now))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error adding QRIS: {e}")
+        return False
+
+
+async def update_qris_name(bot_token: str, qris_id: int, qr_name: str) -> bool:
+    """Update QRIS name"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        cursor.execute("""
+            UPDATE bot_qris SET qr_name = ?, updated_at = ? WHERE id = ? AND bot_token = ?
+        """, (qr_name, now, qris_id, bot_token))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating QRIS name: {e}")
+        return False
+
+
+async def update_qris_note(bot_token: str, qris_id: int, note: str) -> bool:
+    """Update QRIS note"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        cursor.execute("""
+            UPDATE bot_qris SET qr_note = ?, updated_at = ? WHERE id = ? AND bot_token = ?
+        """, (note, now, qris_id, bot_token))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating QRIS note: {e}")
+        return False
+
+
+async def update_qris_fee(bot_token: str, qris_id: int, fee: float) -> bool:
+    """Update QRIS fee"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        cursor.execute("""
+            UPDATE bot_qris SET fee = ?, updated_at = ? WHERE id = ? AND bot_token = ?
+        """, (fee, now, qris_id, bot_token))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating QRIS fee: {e}")
+        return False
+
+
+async def delete_qris(bot_token: str, qris_id: int) -> bool:
+    """Delete QRIS"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM bot_qris WHERE id = ? AND bot_token = ?", (qris_id, bot_token))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting QRIS: {e}")
+        return False
+
+
+async def get_qris_list(bot_token: str) -> List[Dict]:
+    """Get all QRIS for bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, qr_string, qr_name, qr_note, fee, is_active, created_at, updated_at
+            FROM bot_qris WHERE bot_token = ? ORDER BY id ASC
+        """, (bot_token,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{
+            'id': r[0], 'qr_string': r[1], 'qr_name': r[2], 'qr_note': r[3],
+            'fee': r[4], 'is_active': r[5], 'created_at': r[6], 'updated_at': r[7]
+        } for r in rows]
+    except Exception as e:
+        logger.error(f"Error getting QRIS list: {e}")
+        return []
+
+
+async def get_active_qris(bot_token: str) -> Optional[Dict]:
+    """Get active QRIS for bot"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, qr_string, qr_name, qr_note, fee, created_at, updated_at
+            FROM bot_qris WHERE bot_token = ? AND is_active = 1
+        """, (bot_token,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {
+                'id': row[0], 'qr_string': row[1], 'qr_name': row[2],
+                'qr_note': row[3], 'fee': row[4], 'created_at': row[5], 'updated_at': row[6]
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Error getting active QRIS: {e}")
+        return None
+
+
+async def set_active_qris(bot_token: str, qris_id: int) -> bool:
+    """Set active QRIS (deactivate others first)"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        # Deactivate all
+        cursor.execute("UPDATE bot_qris SET is_active = 0, updated_at = ? WHERE bot_token = ?", (now, bot_token))
+        # Activate selected
+        cursor.execute("UPDATE bot_qris SET is_active = 1, updated_at = ? WHERE id = ? AND bot_token = ?", 
+                      (now, qris_id, bot_token))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error setting active QRIS: {e}")
+        return False
+
+
+async def toggle_qris_active(bot_token: str) -> bool:
+    """Toggle QRIS active status"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = get_jakarta_time_iso()
+        active_qris = await get_active_qris(bot_token)
+        
+        if active_qris:
+            # Deactivate if active
+            cursor.execute("UPDATE bot_qris SET is_active = 0, updated_at = ? WHERE bot_token = ?", (now, bot_token))
+        else:
+            # Activate first QRIS if exists
+            cursor.execute("""
+                UPDATE bot_qris SET is_active = 1, updated_at = ? 
+                WHERE bot_token = ? AND id = (SELECT id FROM bot_qris WHERE bot_token = ? LIMIT 1)
+            """, (now, bot_token, bot_token))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error toggling QRIS active: {e}")
+        return False
 
 # ===================== USER FUNCTIONS =====================
 
