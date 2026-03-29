@@ -217,22 +217,38 @@ async def set_active_bank_account(bot_token: str, account_id: int) -> bool:
 # ===================== QRIS FUNCTIONS =====================
 
 async def add_qris(bot_token: str, qr_string: str, qr_name: str = None) -> bool:
-    """Add QRIS for bot"""
+    """Add or update QRIS for bot (only one QRIS per bot)"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         now = get_jakarta_time_iso()
-        cursor.execute("""
-            INSERT INTO bot_qris (bot_token, qr_string, qr_name, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (bot_token, qr_string, qr_name, now, now))
+        
+        # Cek apakah sudah ada QRIS untuk bot ini
+        cursor.execute("SELECT id FROM bot_qris WHERE bot_token = ?", (bot_token,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Update QRIS yang sudah ada
+            cursor.execute("""
+                UPDATE bot_qris 
+                SET qr_string = ?, qr_name = ?, updated_at = ? 
+                WHERE bot_token = ?
+            """, (qr_string, qr_name, now, bot_token))
+            logger.info(f"QRIS updated for bot {bot_token}")
+        else:
+            # Insert QRIS baru
+            cursor.execute("""
+                INSERT INTO bot_qris (bot_token, qr_string, qr_name, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (bot_token, qr_string, qr_name, now, now))
+            logger.info(f"QRIS added for bot {bot_token}")
+        
         conn.commit()
         conn.close()
         return True
     except Exception as e:
-        logger.error(f"Error adding QRIS: {e}")
+        logger.error(f"Error adding/updating QRIS: {e}")
         return False
-
 
 async def update_qris_name(bot_token: str, qris_id: int, qr_name: str) -> bool:
     """Update QRIS name"""
@@ -318,7 +334,6 @@ async def get_qris_list(bot_token: str) -> List[Dict]:
         logger.error(f"Error getting QRIS list: {e}")
         return []
 
-
 async def get_active_qris(bot_token: str) -> Optional[Dict]:
     """Get active QRIS for bot"""
     try:
@@ -339,7 +354,6 @@ async def get_active_qris(bot_token: str) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"Error getting active QRIS: {e}")
         return None
-
 
 async def set_active_qris(bot_token: str, qris_id: int) -> bool:
     """Set active QRIS (deactivate others first)"""
