@@ -347,11 +347,17 @@ async def set_active_qris(bot_token: str, qris_id: int) -> bool:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         now = get_jakarta_time_iso()
-        # Deactivate all
-        cursor.execute("UPDATE bot_qris SET is_active = 0, updated_at = ? WHERE bot_token = ?", (now, bot_token))
-        # Activate selected
-        cursor.execute("UPDATE bot_qris SET is_active = 1, updated_at = ? WHERE id = ? AND bot_token = ?", 
-                      (now, qris_id, bot_token))
+        
+        if qris_id == 0:
+            # Nonaktifkan semua
+            cursor.execute("UPDATE bot_qris SET is_active = 0, updated_at = ? WHERE bot_token = ?", (now, bot_token))
+        else:
+            # Deactivate all
+            cursor.execute("UPDATE bot_qris SET is_active = 0, updated_at = ? WHERE bot_token = ?", (now, bot_token))
+            # Activate selected
+            cursor.execute("UPDATE bot_qris SET is_active = 1, updated_at = ? WHERE id = ? AND bot_token = ?", 
+                          (now, qris_id, bot_token))
+        
         conn.commit()
         conn.close()
         return True
@@ -359,24 +365,26 @@ async def set_active_qris(bot_token: str, qris_id: int) -> bool:
         logger.error(f"Error setting active QRIS: {e}")
         return False
 
-
 async def toggle_qris_active(bot_token: str) -> bool:
     """Toggle QRIS active status"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         now = get_jakarta_time_iso()
-        active_qris = await get_active_qris(bot_token)
         
-        if active_qris:
-            # Deactivate if active
+        # Cek apakah ada QRIS aktif
+        cursor.execute("SELECT id FROM bot_qris WHERE bot_token = ? AND is_active = 1", (bot_token,))
+        active = cursor.fetchone()
+        
+        if active:
+            # Jika ada yang aktif, nonaktifkan semua
             cursor.execute("UPDATE bot_qris SET is_active = 0, updated_at = ? WHERE bot_token = ?", (now, bot_token))
         else:
-            # Activate first QRIS if exists
-            cursor.execute("""
-                UPDATE bot_qris SET is_active = 1, updated_at = ? 
-                WHERE bot_token = ? AND id = (SELECT id FROM bot_qris WHERE bot_token = ? LIMIT 1)
-            """, (now, bot_token, bot_token))
+            # Jika tidak ada yang aktif, aktifkan QRIS pertama
+            cursor.execute("SELECT id FROM bot_qris WHERE bot_token = ? ORDER BY id ASC LIMIT 1", (bot_token,))
+            first_qris = cursor.fetchone()
+            if first_qris:
+                cursor.execute("UPDATE bot_qris SET is_active = 1, updated_at = ? WHERE id = ?", (now, first_qris[0]))
         
         conn.commit()
         conn.close()
