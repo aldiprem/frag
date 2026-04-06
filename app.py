@@ -115,7 +115,7 @@ def check_auth():
     return jsonify({'authenticated': False})
 
 if __name__ == '__main__':
-    print("🚀 Starting Flask server on http://websize.online")
+    print("🚀 Starting Flask server on http://websize.online:9090")
     print("📁 File structure:")
     print("   ├── app.py")
     print("   ├── index.html")
@@ -123,5 +123,7 @@ if __name__ == '__main__':
     print("   │   └── style.css")
     print("   └── js/")
     print("       └── script.js")
-    # Jalankan di port 80 (HTTP default)
-    app.run(host='0.0.0.0', port=80, debug=True)
+    print("\n⚠️  Website utama di http://websize.online (port 80) tetap berjalan")
+    print("✅ Aplikasi admin bot di http://websize.online:9090")
+    # Jalankan di port 9090 (tidak bentrok dengan Nginx di port 80)
+    app.run(host='0.0.0.0', port=9090, debug=True)
