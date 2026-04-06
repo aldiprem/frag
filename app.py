@@ -125,5 +125,4 @@ if __name__ == '__main__':
     print("       └── script.js")
     print("\n⚠️  Website utama di http://websize.online (port 80) tetap berjalan")
     print("✅ Aplikasi admin bot di http://websize.online:9090")
-    # Jalankan di port 9090 (tidak bentrok dengan Nginx di port 80)
     app.run(host='0.0.0.0', port=9090, debug=True)
