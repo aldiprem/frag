@@ -115,7 +115,7 @@ def check_auth():
     return jsonify({'authenticated': False})
 
 if __name__ == '__main__':
-    print("🚀 Starting Flask server on http://localhost:9090")
+    print("🚀 Starting Flask server on http://websize.online")
     print("📁 File structure:")
     print("   ├── app.py")
     print("   ├── index.html")
@@ -123,4 +123,5 @@ if __name__ == '__main__':
     print("   │   └── style.css")
     print("   └── js/")
     print("       └── script.js")
-    app.run(host='0.0.0.0', port=9090, debug=True)
+    # Jalankan di port 80 (HTTP default)
+    app.run(host='0.0.0.0', port=80, debug=True)
