@@ -5,7 +5,12 @@ import os
 from datetime import datetime
 import secrets
 
-app = Flask(__name__)
+# Konfigurasi Flask untuk membaca file di root folder
+app = Flask(__name__,
+           template_folder='.',      # Cari template di root folder (tempat index.html)
+           static_folder='.',        # Cari static files di root folder
+           static_url_path='')       # URL untuk static files (tanpa /static prefix)
+
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_TYPE'] = 'filesystem'
 
@@ -59,7 +64,6 @@ def login_required(f):
 
 @app.route('/')
 def index():
-    """Main landing page / lobby"""
     return render_template('index.html')
 
 @app.route('/api/pricing')
@@ -112,6 +116,11 @@ def check_auth():
 
 if __name__ == '__main__':
     print("🚀 Starting Flask server on http://localhost:9090")
-    print("📁 Static files: /static/css/, /static/js/")
-    print("📁 Templates: /templates/")
+    print("📁 File structure:")
+    print("   ├── app.py")
+    print("   ├── index.html")
+    print("   ├── css/")
+    print("   │   └── style.css")
+    print("   └── js/")
+    print("       └── script.js")
     app.run(host='0.0.0.0', port=9090, debug=True)
