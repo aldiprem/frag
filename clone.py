@@ -32,6 +32,7 @@ import secrets
 from urllib.parse import urlencode
 import pytz
 import sqlite3
+from database.db_mysql import get_bot_config
 
 from database.data import (
     get_all_stats, get_bot_price_config, get_price_templates, calculate_price
